@@ -13,7 +13,7 @@ source "$ROOT_DIR/lib/common.sh"
 
 ROLE=""
 GRAYLOG_HOST=""
-AGENTS=""          # comma list: vector,rustinel,falco,sysmon (vector is always added)
+AGENTS=""          # comma list: vector,rustinel,falco,sysmon,atr,ollama-atr-proxy (vector always added)
 NONINTERACTIVE=0
 LINK_MISP_ONLY=0
 
@@ -28,14 +28,17 @@ for arg in "$@"; do
       cat <<'EOF'
 Usage:
   run.sh --role=core
-  run.sh --role=agent --graylog=<ip-or-hostname> [--agents=vector,rustinel,falco,sysmon] [--yes]
+  run.sh --role=agent --graylog=<ip-or-hostname> [--agents=vector,rustinel,falco,sysmon,atr,ollama-atr-proxy] [--yes]
 
 Roles:
-  core    Installs Graylog stack + MISP on this host (Docker-based).
+  core    Installs Graylog stack + MISP + OTel Collector on this host (Docker-based).
   agent   Installs Vector (always) + optional detection tools on this host.
 
 If --agents is omitted in agent mode, you'll be prompted interactively for
-each tool. Falco is only offered on hosts where Docker is detected.
+each tool. Falco is only offered on hosts where Docker is detected. ATR
+(AI agent threat scanning) needs ATR_SCAN_PATHS exported before running.
+ollama-atr-proxy needs Ollama reachable (OLLAMA_UPSTREAM, default
+http://127.0.0.1:11434) -- see lib/agent_ollama_atr_proxy.sh for details.
 EOF
       exit 0
       ;;
@@ -79,6 +82,14 @@ case "$ROLE" in
         sysmon)
           source "$ROOT_DIR/lib/agent_sysmon.sh"
           install_sysmon "$ROOT_DIR"
+          ;;
+        atr)
+          source "$ROOT_DIR/lib/agent_atr.sh"
+          install_atr "$ROOT_DIR"
+          ;;
+        ollama-atr-proxy)
+          source "$ROOT_DIR/lib/agent_ollama_atr_proxy.sh"
+          install_ollama_atr_proxy "$ROOT_DIR"
           ;;
         vector|"") ;; # already installed / no-op
         *) log "Skipping unknown agent '$a'" ;;

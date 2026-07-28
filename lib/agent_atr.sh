@@ -17,13 +17,6 @@ ATR_SCAN_INTERVAL="${ATR_SCAN_INTERVAL:-15min}"   # systemd OnCalendar/OnUnitAct
 ATR_FINDINGS_LOG="/opt/threadline-atr-findings.ndjson"
 ATR_SCAN_SCRIPT="/opt/threadline-atr-scan.sh"
 
-install_nodejs_if_missing() {
-  has_cmd node && has_cmd npm && return
-  log "Installing Node.js (required for the ATR CLI)..."
-  curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
-  apt-get install -y nodejs
-}
-
 install_atr() {
   local root_dir="$1"
 

@@ -1,0 +1,11 @@
+{
+  "name": "threadline-ollama-atr-proxy",
+  "version": "0.1.0",
+  "description": "Reverse proxy in front of Ollama's API: logs every prompt through the ATR engine, optionally blocks high/critical matches, ships findings to Graylog via Vector.",
+  "type": "module",
+  "main": "server.js",
+  "license": "MIT",
+  "dependencies": {
+    "agent-threat-rules": "^3.5.0"
+  }
+}

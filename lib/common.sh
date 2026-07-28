@@ -8,6 +8,15 @@ die()  { echo -e "\033[1;31m[threadline][FATAL]\033[0m $*" >&2; exit 1; }
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+# Shared by lib/agent_atr.sh and lib/agent_ollama_atr_proxy.sh -- both need
+# a working Node.js/npm to install the ATR CLI or the ollama-atr-proxy.
+install_nodejs_if_missing() {
+  has_cmd node && has_cmd npm && return
+  log "Installing Node.js (required for ATR-based tools)..."
+  curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
+  apt-get install -y nodejs
+}
+
 require_supported_os() {
   [ -f /etc/os-release ] || die "Cannot detect OS (/etc/os-release missing). Ubuntu 22.04/24.04 required."
   # shellcheck disable=SC1091
@@ -65,6 +74,18 @@ prompt_agent_selection() {
 
   read -rp "Install Sysmon for Linux (Sysmon-schema process/network/file telemetry)? [y/N] " a
   [[ "$a" =~ ^[Yy]$ ]] && selected+=("sysmon")
+
+  read -rp "Install ATR (AI agent threat scanning -- only useful if this host runs MCP servers, Claude Code, or similar agent tooling)? [y/N] " a
+  if [[ "$a" =~ ^[Yy]$ ]]; then
+    if [ -z "${ATR_SCAN_PATHS:-}" ]; then
+      echo "  ATR_SCAN_PATHS isn't set. Example: export ATR_SCAN_PATHS=\"/root/.claude/skills,/opt/mcp-servers\"" >&2
+      echo "  Set it and re-run, or the ATR install step will skip itself with a reminder." >&2
+    fi
+    selected+=("atr")
+  fi
+
+  read -rp "Install the Ollama ATR proxy (only if this host runs Ollama)? [y/N] " a
+  [[ "$a" =~ ^[Yy]$ ]] && selected+=("ollama-atr-proxy")
 
   local IFS=','
   echo "${selected[*]}"

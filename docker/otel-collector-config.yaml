@@ -1,0 +1,37 @@
+# threadline :: OpenTelemetry Collector config
+#
+# Sits between OTel-emitting apps (Claude Code, Claude Cowork -- anything
+# that speaks OTLP) and Graylog's own native OpenTelemetry (gRPC) input.
+# Graylog's own docs specify a Collector in front rather than exporting
+# directly into their input, so this container is that hop.
+#
+# Claude Code (CLI, VS Code extension, remote-SSH hosts alike) points its
+# OTEL_EXPORTER_OTLP_ENDPOINT at THIS collector's exposed port (4317 on the
+# core VM), not at Graylog directly. See docs/ai-agent-telemetry.md.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+
+exporters:
+  # "graylog" resolves via Docker's internal network (same compose project).
+  # This target port (4318) is intentionally different from this collector's
+  # own listening port (4317) -- see docs/ai-agent-telemetry.md for why, and
+  # for the one manual step (creating this input in the Graylog UI) that
+  # isn't automated, same reasoning as the MISP lookup table setup.
+  otlp/graylog:
+    endpoint: graylog:4318
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/graylog]

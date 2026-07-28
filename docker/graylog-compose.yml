@@ -52,6 +52,19 @@ services:
       - graylog_data:/usr/share/graylog/data/data
       - graylog_journal:/usr/share/graylog/data/journal
 
+  otel-collector:
+    image: otel/opentelemetry-collector:latest   # pin a specific version once you've settled on one
+    container_name: soc-otel-collector
+    restart: unless-stopped
+    depends_on:
+      - graylog
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317/tcp"      # OTLP gRPC -- Claude Code / Cowork point here, not at Graylog directly
+    networks: [threadline]
+
 networks:
   threadline:
     driver: bridge

@@ -1,3 +1,4 @@
 .env
 docker/misp-docker/
+node_modules/
 *.log

@@ -77,7 +77,10 @@ Graylog expertise required:
    sudo /opt/threadline/run.sh --role=core --link-misp
    ```
    (only works if you already created the `misp-adapter` data adapter once via the UI in step 2 —
-   this just patches in the key automatically on every future re-run/rotation).
+   this patches in the key automatically on every future re-run/rotation. It also **loads MISP's
+   default feed catalog, enables the feeds listed in `MISP_ENABLE_FEEDS`, adds anything in
+   `MISP_CUSTOM_FEEDS` — see the comments in `.env.example` for a Rösti example — and triggers an
+   initial fetch**, so this one command is doing double duty.)
 4. **Create a cache**: **System → Lookup Tables → Caches → Create cache**, TTL 12-24h is reasonable for a homelab.
 5. **Create the lookup table**: bind adapter + cache, name it `misp_ioc_lookup`.
 6. **Add a pipeline rule** enriching `src_ip`/`dst_ip` fields with it (Sigma alert pipelines and the
@@ -91,10 +94,18 @@ curl -fsSL https://raw.githubusercontent.com/YOURORG/threadline/main/install.sh 
 ```
 
 Vector is always installed. You'll be prompted interactively for Rustinel / Falco (only offered if
-Docker is present on that host) / Sysmon-Linux. To skip prompts (e.g. for scripting a few hosts):
+Docker is present on that host) / Sysmon-Linux / ATR (AI agent threat scanning) / the Ollama ATR
+proxy. To skip prompts (e.g. for scripting a few hosts):
 
 ```bash
 sudo bash -s -- --role=agent --graylog=<core-vm-ip> --agents=rustinel,sysmon --yes
+
+# On a host running MCP servers / Claude Code / agent frameworks, add ATR:
+export ATR_SCAN_PATHS="/root/.claude/skills,/opt/mcp-servers"
+sudo bash -s -- --role=agent --graylog=<core-vm-ip> --agents=rustinel,atr --yes
+
+# On a host running Ollama:
+sudo bash -s -- --role=agent --graylog=<core-vm-ip> --agents=ollama-atr-proxy --yes
 ```
 
 Re-running the installer on a host you've already set up is safe — it updates configs/binaries and
@@ -119,12 +130,34 @@ Sysmon-Linux syncs the real **[MSTIC-Sysmon](https://github.com/microsoft/MSTIC-
 export MSTIC_SYSMON_CONFIG="collect-all.xml"
 ```
 
+**ATR** ([agentthreatrule.org](https://agentthreatrule.org)) is a different threat surface entirely —
+AI agent security (prompt injection, tool poisoning, malicious MCP skills/configs) rather than
+host/container behavior. Opt-in only, and only useful on hosts actually running AI agent tooling
+(MCP servers, Claude Code, LangChain-style frameworks). Set `ATR_SCAN_PATHS` (comma-separated
+directories to scan) before installing it — without that variable the install step skips itself
+with a reminder rather than doing nothing silently. It runs on a systemd timer (`ATR_SCAN_INTERVAL`,
+default 15min) rather than a live event stream — SARIF output gets flattened to NDJSON and shipped
+to Graylog the same way as Rustinel/Falco findings, tagged `source_tool=atr`.
+
 Vendor rule checkouts live under `/opt/threadline-cache/` on each agent host (gitignored, not part of this repo) so the repo itself stays small and update cadence is a `git pull` away from current rather than pinned in this project. To point at a fork or different commit, export before running the installer:
 
 ```bash
 export YARA_COLLECTION_REPO="https://github.com/you/your-fork.git"
 export SIGMAHQ_CATEGORIES="linux cloud"   # narrower/wider than the default linux/cloud/network/web
 ```
+
+## AI/LLM telemetry (Claude Code, Claude Cowork, Ollama)
+
+The core stack also brings up an **OTel Collector** (`docker/graylog-compose.yml`), bridging
+OpenTelemetry-emitting apps to Graylog's native OTLP input — covers Claude Code CLI, the VS Code
+extension, and Claude Cowork, including over Remote-SSH. Ollama has no OTel equivalent, so
+`docker/ollama-atr-proxy/` is a small reverse proxy with a real embedded ATR engine instead —
+install it as the `ollama-atr-proxy` agent, point n8n's Ollama node at it instead of Ollama
+directly, and it can either just log matches (`alert` mode) or block high/critical ones outright
+(`enforce` mode).
+
+Full walkthrough, including the Remote-SSH extension-placement gotcha and known upstream bugs to
+check for first: [`docs/ai-agent-telemetry.md`](docs/ai-agent-telemetry.md).
 
 Rustinel hot-reloads all of this without a restart. To refresh rules on a host without touching the binary or systemd unit:
 
@@ -142,7 +175,11 @@ threadline/
 ├── run.sh                  # real entrypoint, dispatches --role=core|agent
 ├── .env.example
 ├── docker/
-│   └── graylog-compose.yml
+│   ├── graylog-compose.yml
+│   ├── otel-collector-config.yaml
+│   └── ollama-atr-proxy/
+│       ├── package.json
+│       └── server.js
 ├── content-packs/
 │   └── graylog-threadline.json
 ├── lib/
@@ -152,11 +189,14 @@ threadline/
 │   ├── agent_vector.sh
 │   ├── agent_rustinel.sh
 │   ├── agent_falco.sh
-│   └── agent_sysmon.sh
+│   ├── agent_sysmon.sh
+│   ├── agent_atr.sh
+│   └── agent_ollama_atr_proxy.sh
 ├── rules/
-│   ├── sigma/  yara/  falco/  sysmon-config/
+│   ├── sigma/  yara/  falco/
 └── docs/
-    └── graylog-pipelines.md
+    ├── graylog-pipelines.md
+    └── ai-agent-telemetry.md
 ```
 
 ## What this deliberately does not do

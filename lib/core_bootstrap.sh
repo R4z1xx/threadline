@@ -237,6 +237,13 @@ bootstrap_core() {
  Graylog : http://$(hostname -I | awk '{print $1}'):9000   (admin / see .env)
  MISP    : ${MISP_BASE_URL}   (see .env)
 
+ One more manual step for AI/LLM telemetry (Claude Code, Cowork):
+   Graylog UI -> System -> Inputs -> select "OpenTelemetry (gRPC)" -> Launch
+   new input -> bind address 0.0.0.0, port 4318 (NOT 4317 -- that's the
+   otel-collector container's own listening port, already running and
+   reachable at $(hostname -I | awk '{print $1}'):4317 for Claude Code to
+   point at). See docs/ai-agent-telemetry.md for the full walkthrough.
+
  Next: install agents on the VMs you want monitored:
    curl -fsSL https://raw.githubusercontent.com/YOURORG/threadline/main/install.sh \\
      | sudo bash -s -- --role=agent --graylog=$(hostname -I | awk '{print $1}')
