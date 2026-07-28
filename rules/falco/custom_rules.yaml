@@ -1,0 +1,26 @@
+# threadline :: custom Falco rules
+# Falco's default falco_rules.yaml already covers most generic container
+# suspicious-behavior cases. Add app-specific rules here as your lab
+# services grow. This file is copied into /etc/falco/rules.d/ on every
+# agent install/update -- edit it in the repo, not on the host, so changes
+# survive re-runs.
+
+- rule: Shell Spawned in Lab Container
+  desc: Detects an interactive shell spawned inside any container on this host
+  condition: >
+    spawned_process and container and shell_procs and proc.tty != 0
+  output: >
+    Shell spawned in container (user=%user.name container=%container.name
+    image=%container.image.repository command=%proc.cmdline parent=%proc.pname)
+  priority: NOTICE
+  tags: [container, shell, lab]
+
+- rule: Outbound Connection From Container to Unexpected Port
+  desc: Flags containers making outbound connections on ports other than common web/db ports
+  condition: >
+    outbound and container and not fd.sport in (80, 443, 53, 123)
+  output: >
+    Unusual outbound connection (container=%container.name dest=%fd.rip:%fd.rport
+    proc=%proc.name)
+  priority: WARNING
+  tags: [network, container, lab]

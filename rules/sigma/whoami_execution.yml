@@ -1,0 +1,24 @@
+title: Whoami Execution
+id: a7c3e1d2-4b1a-4f3e-9c2a-8e6f1d2b9a11
+status: experimental
+description: >
+  Detects execution of `whoami`, a common recon step for attackers and
+  post-exploitation frameworks confirming the current user context.
+  Included as a bundled sanity-check rule -- if this never fires, verify
+  your detection pipeline (Rustinel or Graylog Sigma conversion) end to end
+  before trusting it for anything more serious.
+author: threadline
+date: 2026/07/26
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection:
+    Image|endswith: '/whoami'
+  condition: selection
+falsepositives:
+  - Legitimate administrative use, scripts calling whoami for logging context
+level: low
+tags:
+  - attack.discovery
+  - attack.t1033

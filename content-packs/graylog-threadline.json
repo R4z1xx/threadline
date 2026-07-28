@@ -1,0 +1,31 @@
+{
+  "v": 1,
+  "id": "0f1b6e2a-7a2e-4b9a-9f2f-threadline-01",
+  "rev": 1,
+  "name": "threadline starter pack",
+  "summary": "GELF input pre-configured for the threadline project (Vector agents ship here).",
+  "description": "Sets up the GELF UDP/12201 input that every threadline agent (Vector) ships logs and EDR alerts to. Pipelines, the MISP lookup table, and dashboards are documented as a short guided setup in README.md#post-install-graylog-setup because their exact JSON schema is more version-sensitive than a plain input -- importing a stale schema silently breaks more than it helps. Re-export this pack from your own Graylog (System > Content Packs > Export) once you've built out pipelines/dashboards you like, to replace this file for future installs.",
+  "vendor": "threadline",
+  "url": "https://github.com/YOURORG/threadline",
+  "parameters": [],
+  "entities": [
+    {
+      "v": "1",
+      "type": { "name": "input", "version": "1" },
+      "id": "1f0a1e1a-gelf-udp-input-0001",
+      "data": {
+        "title": { "value": "threadline GELF UDP", "type": "string" },
+        "type": { "value": "org.graylog2.inputs.gelf.udp.GELFUDPInput", "type": "string" },
+        "global": { "value": true, "type": "boolean" },
+        "configuration": {
+          "bind_address": { "value": "0.0.0.0", "type": "string" },
+          "port": { "value": 12201, "type": "integer" },
+          "recv_buffer_size": { "value": 262144, "type": "integer" },
+          "decompress_size_limit": { "value": 8388608, "type": "integer" }
+        },
+        "static_fields": {},
+        "extractors": []
+      }
+    }
+  ]
+}
