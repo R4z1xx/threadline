@@ -35,7 +35,11 @@ require_supported_os() {
 # Generates a random alphanumeric string of a given length.
 rand_str() {
   local len="${1:-32}"
-  tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$len"
+  local out=""
+  while [ "${#out}" -lt "$len" ]; do
+    out+="$(head -c 256 /dev/urandom | tr -dc 'A-Za-z0-9')"
+  done
+  echo "${out:0:$len}"
 }
 
 # sha256 of a string, hex-encoded (used for Graylog root_password_sha2 equivalent).
