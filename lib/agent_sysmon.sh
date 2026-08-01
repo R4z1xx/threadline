@@ -22,8 +22,8 @@ MSTIC_SYSMON_REPO="${MSTIC_SYSMON_REPO:-https://github.com/microsoft/MSTIC-Sysmo
 MSTIC_SYSMON_CONFIG="${MSTIC_SYSMON_CONFIG:-main.xml}"
 
 sync_mstic_config() {
-  local checkout="/opt/homelab-soc-cache/mstic-sysmon"
-  mkdir -p /opt/homelab-soc-cache
+  local checkout="/opt/threadline-cache/mstic-sysmon"
+  mkdir -p /opt/threadline-cache
 
   log "Syncing MSTIC-Sysmon config (${MSTIC_SYSMON_CONFIG})..."
   if [ ! -d "$checkout/.git" ]; then
