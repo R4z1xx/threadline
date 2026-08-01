@@ -44,7 +44,7 @@ on each machine.
 On the VM that will host both:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOURORG/threadline/main/install.sh | sudo bash -s -- --role=core
+curl -fsSL https://raw.githubusercontent.com/R4z1xx/threadline/main/install.sh | sudo bash -s -- --role=core
 ```
 
 This will:
@@ -89,7 +89,7 @@ Graylog expertise required:
 ## 3. Install agents on every VM you want monitored
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOURORG/threadline/main/install.sh | \
+curl -fsSL https://raw.githubusercontent.com/R4z1xx/threadline/main/install.sh | \
   sudo bash -s -- --role=agent --graylog=<core-vm-ip>
 ```
 
