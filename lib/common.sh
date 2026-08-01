@@ -34,12 +34,29 @@ require_supported_os() {
 
 # Generates a random alphanumeric string of a given length.
 rand_str() {
+  # Deliberately NOT `tr -dc ... </dev/urandom | head -c "$len"`: under
+  # set -o pipefail (enabled repo-wide), head closing the pipe early sends
+  # tr a SIGPIPE, pipefail propagates that non-zero exit, and set -e kills
+  # the whole script -- silently, no error message. Bounding the urandom
+  # read up front (head reads a fixed amount and exits cleanly, nothing
+  # downstream ever closes a pipe on a still-writing process) avoids the
+  # whole class of bug.
   local len="${1:-32}"
   local out=""
   while [ "${#out}" -lt "$len" ]; do
     out+="$(head -c 256 /dev/urandom | tr -dc 'A-Za-z0-9')"
   done
   echo "${out:0:$len}"
+}
+
+# Like rand_str, but guarantees at least one uppercase, lowercase, digit,
+# and special character -- needed for OpenSearch's demo-security password
+# strength check (alnum-only rand_str fails it: no special char).
+rand_password() {
+  local len="${1:-20}"
+  local body
+  body="$(rand_str $((len > 4 ? len - 4 : 4)))"
+  echo "${body}Aa1!"
 }
 
 # sha256 of a string, hex-encoded (used for Graylog root_password_sha2 equivalent).

@@ -17,7 +17,19 @@ services:
     restart: unless-stopped
     environment:
       - discovery.type=single-node
-      - plugins.security.disabled=true          # lab simplicity; do not expose this port externally
+      # The Docker entrypoint (2.12+) refuses to start at all without this,
+      # regardless of the disabled flag below -- it's a startup gate, not
+      # an auth requirement once running. plugins.security.disabled=true
+      # still fully disables the security plugin at runtime once past that
+      # gate, so Graylog talks to this over plain HTTP with no auth, same
+      # as before. If you ever see 401s from Graylog's OpenSearch calls
+      # instead of a clean connection, that means this combination stopped
+      # working on whatever OpenSearch version you're running -- fall back
+      # to configuring GRAYLOG_ELASTICSEARCH_HOSTS with basic auth
+      # (https://admin:${OPENSEARCH_INITIAL_ADMIN_PASSWORD}@opensearch:9200)
+      # instead of trying to disable security.
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_INITIAL_ADMIN_PASSWORD}
+      - plugins.security.disabled=true          # homelab simplicity; do not expose this port externally
       - "OPENSEARCH_JAVA_OPTS=-Xms${OPENSEARCH_HEAP:-1g} -Xmx${OPENSEARCH_HEAP:-1g}"
       - bootstrap.memory_lock=true
     ulimits:
