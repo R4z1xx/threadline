@@ -447,12 +447,25 @@ print(json.dumps({
   'name': 'misp-adapter',
   'config': {
     'type': 'httpjsonpath',
-    'url': sys.argv[1] + '/attributes/restSearch/\${key}',
-    'headers': {'Authorization': sys.argv[2], 'Accept': 'application/json'},
+    # MISP's restSearch endpoint returned '\"Invalid output format.\"' when
+    # queried as GET .../restSearch/\${key} -- confirmed by testing against
+    # a live instance. It expects POST with the search value in the JSON
+    # body instead.
+    'url': sys.argv[1] + '/attributes/restSearch',
+    'headers': {'Authorization': sys.argv[2], 'Accept': 'application/json', 'Content-Type': 'application/json'},
     'single_value_jsonpath': '\$.response.Attribute[0].value',
-    'multi_value_jsonpath': '\$.response.Attribute[*].value',
-    'http_method': 'GET',
-    'body_template': '',
+    # Graylog's multi_value_jsonpath must resolve to a JSON OBJECT whose
+    # top-level keys become result[\"key\"] in a pipeline rule -- NOT an
+    # array. Pointing at [*].value (an array of bare strings) can never
+    # produce result[\"event_id\"] etc.; pointing at [0] (the whole first
+    # matched attribute object) makes every one of MISP's own field names
+    # on that attribute directly available instead. Confirmed against a
+    # real MISP response: value, event_id, comment, Event.info all present
+    # at this path; there's no bare 'tags' field (tag data would live
+    # under a 'Tag' array only when tags exist, not used here).
+    'multi_value_jsonpath': '\$.response.Attribute[0]',
+    'http_method': 'POST',
+    'body_template': json.dumps({'value': '\${key}'}),
     'content_type': 'JSON',
     'http_error_reason_regex': '',
     'http_timeout_ms': 5000,
@@ -591,93 +604,143 @@ create_misp_lookup_table() {
   fi
 }
 
-create_misp_pipeline() {
-  local auth="$1"
-
-  local rule_exists
-  rule_exists=$(curl -sSk -u "$auth" "http://localhost:9000/api/system/pipelines/rule" 2>/dev/null \
-    | grep -o '"title": *"enrich src_ip with MISP"') || true
-
-  if [ -z "$rule_exists" ]; then
-    log "Creating MISP enrichment pipeline rule..."
-    local rule_source rule_json create_raw create_status create_body
-    rule_source=$(cat <<'RULE'
-rule "enrich src_ip with MISP"
+misp_enrich_rule_source() {
+  # Generates the enrichment rule DSL for a given IP field. Confirmed
+  # against a real MISP restSearch response (see git history/PR notes):
+  # value, event_id, comment, and Event.info are all reliably present on
+  # a matched attribute. There is no bare "tags" field -- tag data only
+  # exists as a "Tag" array when tags are actually attached, so it's
+  # replaced here with Event.info (the event title) and comment (the
+  # attribute's own note), both far more useful and reliably present.
+  local field="$1"
+  cat <<RULEEOF
+rule "enrich ${field} with MISP"
 when
-  has_field("src_ip")
+  has_field("${field}")
 then
-  let result = lookup("misp_ioc_lookup", to_string($message.src_ip));
+  let result = lookup("misp_ioc_lookup", to_string(\$message.${field}));
   set_field("misp_match", result["value"]);
   set_field("misp_event_id", result["event_id"]);
-  set_field("misp_tags", result["tags"]);
+  set_field("misp_event_info", result["Event"]["info"]);
+  set_field("misp_comment", result["comment"]);
 end
-RULE
-)
-    rule_json=$(python3 -c "
+RULEEOF
+}
+
+upsert_pipeline_rule() {
+  # Creates a pipeline rule if it doesn't exist, or UPDATES it in place if
+  # it does. The original version only ever checked existence-by-title and
+  # skipped if found -- meaning a fixed rule_source in this script would
+  # never actually reach an already-deployed rule without this.
+  local auth="$1" title="$2" source="$3"
+  local existing_id rule_json resp_raw resp_status resp_body
+
+  existing_id=$(curl -sSk -u "$auth" "http://localhost:9000/api/system/pipelines/rule" 2>/dev/null | python3 -c "
 import json, sys
-print(json.dumps({'title': 'enrich src_ip with MISP', 'description': 'Auto-created by threadline', 'source': sys.argv[1]}))
-" "$rule_source")
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = []
+for r in data:
+    if r.get('title') == sys.argv[1]:
+        print(r.get('id', ''))
+        break
+" "$title" 2>/dev/null) || true
 
-    create_raw=$(curl -sSk -w '\n%{http_code}' -u "$auth" -X POST "http://localhost:9000/api/system/pipelines/rule" \
-      -H "Content-Type: application/json" -H "X-Requested-By: threadline" \
-      --data "$rule_json")
-    create_status=$(echo "$create_raw" | tail -n1)
-    create_body=$(echo "$create_raw" | sed '$d')
+  rule_json=$(python3 -c "
+import json, sys
+print(json.dumps({'title': sys.argv[1], 'description': 'Auto-created by threadline', 'source': sys.argv[2]}))
+" "$title" "$source")
 
-    if [ "$create_status" -ge 200 ] && [ "$create_status" -lt 300 ]; then
-      log "Pipeline rule created."
-    else
-      warn "Pipeline rule creation failed (HTTP ${create_status}): ${create_body}"
-      warn "Manual fallback: docs/graylog-pipelines.md has the copy-paste rule DSL."
-      return
-    fi
+  if [ -n "$existing_id" ]; then
+    log "Updating pipeline rule '${title}'..."
+    resp_raw=$(curl -sSk -w '\n%{http_code}' -u "$auth" -X PUT "http://localhost:9000/api/system/pipelines/rule/${existing_id}" \
+      -H "Content-Type: application/json" -H "X-Requested-By: threadline" --data "$rule_json")
   else
-    log "Pipeline rule already exists."
+    log "Creating pipeline rule '${title}'..."
+    resp_raw=$(curl -sSk -w '\n%{http_code}' -u "$auth" -X POST "http://localhost:9000/api/system/pipelines/rule" \
+      -H "Content-Type: application/json" -H "X-Requested-By: threadline" --data "$rule_json")
   fi
+  resp_status=$(echo "$resp_raw" | tail -n1)
+  resp_body=$(echo "$resp_raw" | sed '$d')
 
-  local pipelines_json pipeline_id
+  if [ "$resp_status" -ge 200 ] && [ "$resp_status" -lt 300 ]; then
+    log "Pipeline rule '${title}' is up to date."
+  else
+    warn "Pipeline rule '${title}' create/update failed (HTTP ${resp_status}): ${resp_body}"
+    warn "Manual fallback: docs/graylog-pipelines.md has the copy-paste rule DSL."
+  fi
+}
+
+upsert_pipeline() {
+  # Same create-or-update pattern as upsert_pipeline_rule, for the
+  # pipeline definition itself. Prints the pipeline's ID on stdout (only)
+  # on success so callers can capture it via command substitution -- log/
+  # warn go to stderr, so nothing else contaminates that output.
+  local auth="$1" title="$2" source="$3"
+  local pipelines_json existing_id pipeline_json resp_raw resp_status resp_body
+
   pipelines_json=$(curl -sSk -u "$auth" "http://localhost:9000/api/system/pipelines/pipeline") || true
-  pipeline_id=$(echo "$pipelines_json" | python3 -c "
+  existing_id=$(echo "$pipelines_json" | python3 -c "
 import json, sys
 try:
     data = json.load(sys.stdin)
 except Exception:
     data = []
 for p in data:
-    if p.get('title') == 'threadline MISP enrichment':
+    if p.get('title') == sys.argv[1]:
         print(p.get('id', ''))
         break
-" 2>/dev/null) || true
+" "$title" 2>/dev/null) || true
 
-  if [ -z "$pipeline_id" ]; then
-    log "Creating MISP enrichment pipeline..."
-    local pipeline_source pipeline_json create_raw create_status create_body
-    pipeline_source='pipeline "threadline MISP enrichment"
+  pipeline_json=$(python3 -c "
+import json, sys
+print(json.dumps({'title': sys.argv[1], 'description': 'Auto-created by threadline', 'source': sys.argv[2]}))
+" "$title" "$source")
+
+  if [ -n "$existing_id" ]; then
+    log "Updating pipeline '${title}'..."
+    resp_raw=$(curl -sSk -w '\n%{http_code}' -u "$auth" -X PUT "http://localhost:9000/api/system/pipelines/pipeline/${existing_id}" \
+      -H "Content-Type: application/json" -H "X-Requested-By: threadline" --data "$pipeline_json")
+  else
+    log "Creating pipeline '${title}'..."
+    resp_raw=$(curl -sSk -w '\n%{http_code}' -u "$auth" -X POST "http://localhost:9000/api/system/pipelines/pipeline" \
+      -H "Content-Type: application/json" -H "X-Requested-By: threadline" --data "$pipeline_json")
+  fi
+  resp_status=$(echo "$resp_raw" | tail -n1)
+  resp_body=$(echo "$resp_raw" | sed '$d')
+
+  if [ "$resp_status" -ge 200 ] && [ "$resp_status" -lt 300 ]; then
+    local pid
+    pid=$(echo "$resp_body" | grep -o '"id": *"[^"]*"' | head -1 | sed 's/.*"id": *"\([^"]*\)"/\1/') || true
+    [ -z "$pid" ] && pid="$existing_id"
+    log "Pipeline '${title}' is up to date."
+    echo "$pid"
+  else
+    warn "Pipeline '${title}' create/update failed (HTTP ${resp_status}): ${resp_body}"
+    return 1
+  fi
+}
+
+create_misp_pipeline() {
+  local auth="$1"
+
+  local src_rule_source dst_rule_source
+  src_rule_source=$(misp_enrich_rule_source "src_ip")
+  dst_rule_source=$(misp_enrich_rule_source "dst_ip")
+
+  upsert_pipeline_rule "$auth" "enrich src_ip with MISP" "$src_rule_source"
+  upsert_pipeline_rule "$auth" "enrich dst_ip with MISP" "$dst_rule_source"
+
+  local pipeline_source
+  pipeline_source='pipeline "threadline MISP enrichment"
 stage 0 match either
   rule "enrich src_ip with MISP";
+  rule "enrich dst_ip with MISP";
 end'
-    pipeline_json=$(python3 -c "
-import json, sys
-print(json.dumps({'title': 'threadline MISP enrichment', 'description': 'Auto-created by threadline', 'source': sys.argv[1]}))
-" "$pipeline_source")
 
-    create_raw=$(curl -sSk -w '\n%{http_code}' -u "$auth" -X POST "http://localhost:9000/api/system/pipelines/pipeline" \
-      -H "Content-Type: application/json" -H "X-Requested-By: threadline" \
-      --data "$pipeline_json")
-    create_status=$(echo "$create_raw" | tail -n1)
-    create_body=$(echo "$create_raw" | sed '$d')
-
-    if [ "$create_status" -ge 200 ] && [ "$create_status" -lt 300 ]; then
-      pipeline_id=$(echo "$create_body" | grep -o '"id": *"[^"]*"' | head -1 | sed 's/.*"id": *"\([^"]*\)"/\1/') || true
-      log "Pipeline created."
-    else
-      warn "Pipeline creation failed (HTTP ${create_status}): ${create_body}"
-      warn "Manual fallback: docs/graylog-pipelines.md has the setup steps."
-      return
-    fi
-  else
-    log "Pipeline already exists."
-  fi
+  local pipeline_id
+  pipeline_id=$(upsert_pipeline "$auth" "threadline MISP enrichment" "$pipeline_source") || return
 
   if [ -z "$pipeline_id" ]; then
     warn "Could not determine pipeline ID -- skipping stream connection. Connect it manually: System > Pipelines > (find pipeline) > Edit connections."
