@@ -157,7 +157,7 @@ create_gelf_input() {
   # so without this check a second run would try to bind 12201/udp twice).
   local existing
   existing=$(curl -sS -u "$auth" "http://localhost:9000/api/system/inputs" 2>/dev/null \
-    | grep -o '"title":"threadline GELF UDP"') || true
+    | grep -o '"title": *"threadline GELF UDP"') || true
   if [ -n "$existing" ]; then
     log "GELF UDP input already exists, skipping."
     return
