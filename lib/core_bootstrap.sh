@@ -136,74 +136,55 @@ start_misp_stack() {
   log "MISP is up: https://$(hostname -I | awk '{print $1}')  (user: ${MISP_ADMIN_EMAIL} / password: see .env MISP_ADMIN_PASSWORD)"
 }
 
-import_graylog_content_pack() {
-  local root_dir="$1"
+create_gelf_input() {
+  # Was previously done via a content pack, which turned out to be
+  # persistently fragile across Graylog versions -- a missing required
+  # "constraints" field, an "already found" duplicate-upload error, and
+  # finally a broken details-viewer page that also revealed the input
+  # never actually got created. Content packs are the wrong tool for
+  # "create one static input" -- this uses Graylog's plain Inputs API
+  # directly instead. Fewer moving parts, no nested version-sensitive
+  # schema, and it's the same API System > Inputs > Launch new input
+  # calls under the hood in the UI.
   # shellcheck source=/dev/null
   source "$ENV_FILE"
 
-  local pack_file="$root_dir/content-packs/graylog-threadline.json"
-  [ -f "$pack_file" ] || { warn "Content pack not found at $pack_file, skipping."; return; }
-
-  log "Importing Graylog content pack (GELF input, pipelines, dashboards)..."
+  log "Creating Graylog GELF UDP input..."
   local auth="admin:${GRAYLOG_ROOT_PASSWORD}"
 
-  # Deliberately NOT using curl -f here: on a non-2xx response it suppresses
-  # the response body entirely, which is exactly the error detail we need
-  # to debug a schema mismatch. Capture status + body separately instead.
-  local upload_raw http_status upload_response
-  upload_raw=$(curl -sS -w '\n%{http_code}' -u "$auth" -X POST "http://localhost:9000/api/system/content_packs" \
-    -H "Content-Type: application/json" -H "X-Requested-By: threadline" \
-    --data-binary "@${pack_file}")
-  http_status=$(echo "$upload_raw" | tail -n1)
-  upload_response=$(echo "$upload_raw" | sed '$d')
-
-  local pack_id pack_rev
-
-  if [ "$http_status" -ge 200 ] && [ "$http_status" -lt 300 ]; then
-    # `|| true` on each: if the regex doesn't match (e.g. Graylog's actual
-    # JSON formatting differs from what's expected here), grep exits
-    # non-zero even though head/cut succeed -- under pipefail that failure
-    # propagates to this bare assignment, and set -e kills the whole
-    # script silently. The downstream `[ -n "$pack_id" ]` check already
-    # handles an empty result gracefully, so just don't let a failed
-    # extraction be fatal.
-    pack_id=$(echo "$upload_response"  | grep -o '"id": *"[^"]*"'  | head -1 | sed 's/.*"id": *"\([^"]*\)"/\1/') || true
-    pack_rev=$(echo "$upload_response" | grep -o '"rev": *[0-9]*' | head -1 | sed 's/.*"rev": *//') || true
-  elif echo "$upload_response" | grep -q "already found"; then
-    # Already uploaded on a prior run (idempotent re-run, or you tested the
-    # upload by hand while debugging). Not an error -- the response won't
-    # contain id/rev on this path since nothing new was created, so read
-    # them from the pack file itself instead (they're static) and proceed
-    # straight to the install step.
-    log "Content pack already uploaded from a prior run, proceeding to install..."
-    pack_id=$(grep -o '"id": *"[^"]*"' "$pack_file" | head -1 | sed 's/.*"id": *"\([^"]*\)"/\1/') || true
-    pack_rev=$(grep -o '"rev": *[0-9]*' "$pack_file" | head -1 | sed 's/.*"rev": *//') || true
-  else
-    warn "Content pack upload failed (HTTP ${http_status}): ${upload_response}"
-    warn "This is just the GELF input -- everything else (pipelines, lookup tables, dashboards) was always a manual step per docs/graylog-pipelines.md, so this doesn't block anything."
-    warn "Manual fallback: System > Inputs > select 'GELF UDP' > Launch new input, bind 0.0.0.0:12201/udp."
+  # Idempotent: check for an existing input with our title before creating
+  # a duplicate on every re-run (Graylog doesn't enforce title uniqueness,
+  # so without this check a second run would try to bind 12201/udp twice).
+  local existing
+  existing=$(curl -sS -u "$auth" "http://localhost:9000/api/system/inputs" 2>/dev/null \
+    | grep -o '"title":"threadline GELF UDP"') || true
+  if [ -n "$existing" ]; then
+    log "GELF UDP input already exists, skipping."
     return
   fi
 
-  if [ -n "$pack_id" ] && [ -n "$pack_rev" ]; then
-    local install_raw install_status install_body
-    install_raw=$(curl -sS -w '\n%{http_code}' -u "$auth" -X POST \
-      "http://localhost:9000/api/system/content_packs/${pack_id}/${pack_rev}/installations" \
-      -H "Content-Type: application/json" -H "X-Requested-By: threadline" \
-      --data '{"parameters": {}, "comment": "installed by threadline bootstrap"}')
-    install_status=$(echo "$install_raw" | tail -n1)
-    install_body=$(echo "$install_raw" | sed '$d')
+  local create_raw create_status create_body
+  create_raw=$(curl -sS -w '\n%{http_code}' -u "$auth" -X POST "http://localhost:9000/api/system/inputs" \
+    -H "Content-Type: application/json" -H "X-Requested-By: threadline" \
+    --data '{
+      "title": "threadline GELF UDP",
+      "type": "org.graylog2.inputs.gelf.udp.GELFUDPInput",
+      "global": true,
+      "configuration": {
+        "bind_address": "0.0.0.0",
+        "port": 12201,
+        "recv_buffer_size": 262144,
+        "decompress_size_limit": 8388608
+      }
+    }') || true
+  create_status=$(echo "$create_raw" | tail -n1)
+  create_body=$(echo "$create_raw" | sed '$d')
 
-    if [ "$install_status" -ge 200 ] && [ "$install_status" -lt 300 ]; then
-      log "Content pack installed."
-    elif echo "$install_body" | grep -qi "already installed"; then
-      log "Content pack already installed -- nothing to do."
-    else
-      warn "Content pack install failed (HTTP ${install_status}): ${install_body}"
-      warn "Finish it from System > Content Packs in the Graylog UI if needed."
-    fi
+  if [ "$create_status" -ge 200 ] && [ "$create_status" -lt 300 ]; then
+    log "GELF UDP input created and running on 0.0.0.0:12201/udp."
   else
-    warn "Could not determine content pack ID/revision — check http://<host>:9000/api/api-browser and finish the import manually if needed."
+    warn "GELF UDP input creation failed (HTTP ${create_status}): ${create_body}"
+    warn "Manual fallback: System > Inputs > select 'GELF UDP' > Launch new input, bind 0.0.0.0:12201/udp."
   fi
 }
 
@@ -302,7 +283,7 @@ bootstrap_core() {
   generate_secrets_if_missing "$root_dir"
   start_graylog_stack "$root_dir"
   start_misp_stack
-  import_graylog_content_pack "$root_dir"
+  create_gelf_input "$root_dir"
   link_misp_to_graylog
 
   cat <<EOF

@@ -35,9 +35,62 @@ on each machine.
 
 - Proxmox (or any hypervisor) with a couple of Ubuntu 22.04/24.04 VMs.
 - **Core VM**: 4 vCPU / 8 GB RAM / 60+ GB disk minimum (Graylog + OpenSearch + MISP all run here via Docker).
+- **Core VM's CPU type must expose AVX** — MongoDB 5.0+ (used by the Graylog stack) hard-requires it
+  and crash-loops without it. On Proxmox, the default CPU types (`kvm64`, or the newer
+  `x86-64-v2-AES` baseline) deliberately exclude AVX for migration compatibility — set the VM's
+  **Hardware → Processor → Type** to `host` (or another AVX-including type, e.g. `x86-64-v3`)
+  *before* first boot. The installer checks this itself and fails fast with instructions if it's
+  wrong, but it's a VM-level setting that needs a full VM shutdown/start (not a guest reboot) to
+  take effect, so better to set it upfront.
 - **Monitored VMs/LXCs**: no special sizing — agents use tens of MB RAM at idle. Note: Rustinel/Falco/Sysmon
   need real eBPF access, so run them on full VMs, not unprivileged LXCs.
 - Root/sudo access on every host, outbound internet access (to pull packages/images/CTI feeds).
+
+## Troubleshooting core install
+
+If `--role=core` seems stuck or the Graylog UI never comes up, check what's actually happening
+before assuming it's hung — Java/OpenSearch startup is slow, but a genuine crash-loop looks
+different from "still booting":
+
+```bash
+cd /opt/threadline && docker compose -f docker/graylog-compose.yml logs -f
+```
+
+(the `docker/.env` symlink created by the installer means this works without needing
+`--env-file` explicitly, even run from inside `docker/`)
+
+**`MongoDB 5.0+ requires a CPU with AVX support` repeating, or Graylog can't resolve `mongodb`**:
+your VM's CPU type doesn't expose AVX — see the Requirements note above. The installer's own
+preflight check should catch this before it ever gets this far; if you're seeing it anyway, the
+CPU type change likely didn't fully take effect (needs a full VM **shutdown then start**, not a
+guest reboot — verify with `grep -i avx /proc/cpuinfo` inside the guest after restarting).
+
+**`No custom admin password found... OPENSEARCH_INITIAL_ADMIN_PASSWORD`, `soc-opensearch exited
+with code 1 (restarting)`**: OpenSearch's Docker entrypoint (2.12+) refuses to start at all
+without this variable, independent of `plugins.security.disabled`. The installer generates and
+sets it automatically — if you're hitting this, your `.env` predates that fix; delete
+`/opt/threadline/.env` and re-run `--role=core` to regenerate it with the current `.env.example`.
+Always bring the stack up via `sudo ./run.sh --role=core`, never raw `docker compose up`/`logs` —
+the latter won't pick up `.env` fixes on already-running containers, it just tails whatever's
+already there.
+
+**Image pulls fail with `dial tcp [2600:...]:443: connect: network is unreachable`**: not Docker
+Hub rate limiting (that error looks completely different — an HTTP 429 with `toomanyrequests`).
+This is an IPv6 routing problem: the registry resolved to an IPv6 address and your VM has no
+working IPv6 route, common on Proxmox VMs that get a SLAAC IPv6 address with no real upstream
+IPv6 connectivity behind it. Confirm with `curl -6 -m 5 https://registry-1.docker.io/v2/` (hangs/
+errors) vs `curl -4 -m 5 https://registry-1.docker.io/v2/` (works). Fix by disabling IPv6 on the
+VM:
+```bash
+sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
+sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1
+sudo systemctl restart docker
+# persist across reboots:
+printf 'net.ipv6.conf.all.disable_ipv6 = 1\nnet.ipv6.conf.default.disable_ipv6 = 1\n' | \
+  sudo tee /etc/sysctl.d/99-disable-ipv6.conf && sudo sysctl --system
+```
+Then just re-run the installer or `docker compose pull` again — layer pulls resume/cache, nothing
+already-pulled gets re-downloaded.
 
 ## 1. Install the core (Graylog + MISP)
 
@@ -52,7 +105,7 @@ This will:
 - Generate every secret (Graylog `password_secret`, admin password, MISP DB/Redis passwords, GPG passphrase) into `/opt/threadline/.env` (`chmod 600` — back this file up).
 - Bring up Graylog (MongoDB + OpenSearch + Graylog server) via Docker Compose.
 - Clone the official [`MISP/misp-docker`](https://github.com/MISP/misp-docker) project and bring it up alongside.
-- Import a starter Graylog content pack (the GELF input every agent ships to).
+- Create the GELF UDP input every agent ships to (via Graylog's Inputs API directly, idempotent -- safe to re-run).
 - Print the URLs and credentials you need.
 
 Takes 5-15 minutes depending on your link speed (MISP's image pulls are the slow part).
@@ -180,8 +233,6 @@ threadline/
 │   └── ollama-atr-proxy/
 │       ├── package.json
 │       └── server.js
-├── content-packs/
-│   └── graylog-threadline.json
 ├── lib/
 │   ├── common.sh
 │   ├── docker.sh
