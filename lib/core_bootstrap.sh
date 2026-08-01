@@ -246,6 +246,72 @@ sync_misp_feeds() {
     || warn "Fetch trigger failed -- click 'Fetch and store all feed data' in the MISP UI instead."
 }
 
+find_graylog_cacerts_path() {
+  # Prefer the trust store the running Graylog JVM actually uses (via its
+  # own JAVA_HOME) over a blind `find`, which can turn up more than one
+  # cacerts file in a JVM-based image and pick the wrong one.
+  local cacerts_path
+  cacerts_path=$(docker exec soc-graylog sh -c '[ -n "$JAVA_HOME" ] && [ -f "$JAVA_HOME/lib/security/cacerts" ] && echo "$JAVA_HOME/lib/security/cacerts"' 2>/dev/null) || true
+  if [ -z "$cacerts_path" ]; then
+    cacerts_path=$(docker exec soc-graylog find / -name cacerts 2>/dev/null | head -1) || true
+  fi
+  echo "$cacerts_path"
+}
+
+ensure_misp_cert_has_correct_san() {
+  # MISP's own nginx auto-generates a self-signed cert on first boot with
+  # CN=localhost and SANs limited to localhost/127.0.0.1/::1 -- it does
+  # NOT include whatever IP/hostname you actually reach it on. curl -k
+  # never surfaces this (it skips hostname verification along with trust),
+  # but Java's HTTPS client checks them separately and correctly rejects
+  # the mismatch: "Hostname X not verified ... subjectAltNames: [...]".
+  # Confirmed cert location from misp-docker's own compose file: bind-
+  # mounted from ./ssl/ (relative to $MISP_DIR) into the container at
+  # /etc/nginx/certs/ -- filenames aren't hardcoded here since they're not
+  # guaranteed across misp-docker versions; discovered dynamically instead.
+  local vm_ip="$1"
+  local ssl_dir="$MISP_DIR/ssl"
+
+  [ -d "$ssl_dir" ] || { warn "MISP ssl/ directory not found at $ssl_dir -- skipping cert SAN check."; return; }
+
+  local crt_file key_file
+  crt_file=$(find "$ssl_dir" -maxdepth 1 -iname '*.crt' | head -1) || true
+  key_file=$(find "$ssl_dir" -maxdepth 1 -iname '*.key' | head -1) || true
+
+  if [ -z "$crt_file" ] || [ -z "$key_file" ]; then
+    warn "Could not find MISP's cert/key files in $ssl_dir -- skipping SAN check."
+    warn "Manual fallback: see docs/graylog-pipelines.md."
+    return
+  fi
+
+  if openssl x509 -in "$crt_file" -noout -ext subjectAltName 2>/dev/null | grep -q "$vm_ip"; then
+    log "MISP's certificate already covers ${vm_ip}, no regeneration needed."
+    return
+  fi
+
+  log "MISP's self-signed cert doesn't include this VM's IP (${vm_ip}) in its SAN list -- regenerating..."
+  openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
+    -keyout "$key_file" -out "$crt_file" \
+    -subj "/CN=${vm_ip}" \
+    -addext "subjectAltName=IP:${vm_ip},DNS:localhost,IP:127.0.0.1" 2>/dev/null
+
+  log "Restarting MISP's web container to apply the new certificate..."
+  ( cd "$MISP_DIR" && docker compose restart misp-core )
+  wait_for_http "https://localhost/users/login" 180
+
+  # The cert just changed, so anything Graylog previously trusted under
+  # the misp-selfsigned alias is now stale. keytool -list only checks
+  # whether an alias exists, not whether it matches a given cert, so
+  # trust_misp_cert_in_graylog()'s idempotency check would otherwise skip
+  # re-importing here. Delete the stale entry (best-effort, non-fatal --
+  # fine if it didn't exist yet) so the next call re-imports correctly.
+  local cacerts_path
+  cacerts_path=$(find_graylog_cacerts_path)
+  if [ -n "$cacerts_path" ]; then
+    docker exec -u root soc-graylog keytool -delete -keystore "$cacerts_path" -storepass changeit -alias misp-selfsigned >/dev/null 2>&1 || true
+  fi
+}
+
 trust_misp_cert_in_graylog() {
   # Graylog's JVM has its own trust store, separate from curl/OpenSSL --
   # it won't trust MISP's self-signed cert by default, which surfaces as
@@ -255,7 +321,10 @@ trust_misp_cert_in_graylog() {
   # on any container recreate (docker compose down/up, image update) --
   # that's exactly why this runs every time rather than once: the
   # idempotency check below naturally re-imports after a wipe and no-ops
-  # when nothing changed.
+  # when nothing changed. (A cert *rotation*, as opposed to a wipe, is
+  # handled by ensure_misp_cert_has_correct_san() explicitly invalidating
+  # the stale entry above -- keytool -list here only checks alias
+  # existence, not whether it matches the current cert.)
   local misp_host
   misp_host=$(echo "$MISP_BASE_URL" | sed -E 's~^https?://~~; s~/.*~~; s~:.*~~')
   [ -z "$misp_host" ] && { warn "Could not parse a hostname out of MISP_BASE_URL, skipping cert trust step."; return; }
@@ -272,13 +341,7 @@ trust_misp_cert_in_graylog() {
 
   log "Locating Graylog's JVM trust store..."
   local cacerts_path
-  # Prefer the trust store the running Graylog JVM actually uses (via its
-  # own JAVA_HOME) over a blind `find`, which can turn up more than one
-  # cacerts file in a JVM-based image and pick the wrong one.
-  cacerts_path=$(docker exec soc-graylog sh -c '[ -n "$JAVA_HOME" ] && [ -f "$JAVA_HOME/lib/security/cacerts" ] && echo "$JAVA_HOME/lib/security/cacerts"' 2>/dev/null) || true
-  if [ -z "$cacerts_path" ]; then
-    cacerts_path=$(docker exec soc-graylog find / -name cacerts 2>/dev/null | head -1) || true
-  fi
+  cacerts_path=$(find_graylog_cacerts_path)
 
   if [ -z "$cacerts_path" ]; then
     warn "Could not locate cacerts inside the Graylog container -- skipping trust store import."
@@ -286,10 +349,6 @@ trust_misp_cert_in_graylog() {
     return
   fi
 
-  # Idempotent: skip re-importing (and skip the restart) if this exact
-  # cert is already trusted -- keytool -list also returns non-zero if the
-  # alias exists but the underlying cert changed (e.g. MISP's cert got
-  # regenerated), so this correctly re-triggers an import in that case too.
   if docker exec soc-graylog keytool -list -keystore "$cacerts_path" -storepass changeit -alias misp-selfsigned >/dev/null 2>&1; then
     log "MISP certificate already trusted by Graylog."
     return
@@ -342,7 +401,10 @@ EOF
   local auth="admin:${GRAYLOG_ROOT_PASSWORD}"
   local misp_url="$MISP_BASE_URL"
   local cache_ttl="${MISP_LOOKUP_CACHE_TTL_SECONDS:-43200}"
+  local local_ip
+  local_ip="$(hostname -I | awk '{print $1}')"
 
+  ensure_misp_cert_has_correct_san "$local_ip"
   trust_misp_cert_in_graylog
   create_misp_data_adapter "$auth" "$misp_url" "$MISP_API_KEY"
   create_misp_cache "$auth" "$cache_ttl"
