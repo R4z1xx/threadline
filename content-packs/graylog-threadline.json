@@ -13,6 +13,9 @@
       "v": "1",
       "type": { "name": "input", "version": "1" },
       "id": "1f0a1e1a-gelf-udp-input-0001",
+      "constraints": [
+        { "type": "server-version", "version": ">=6.0.0" }
+      ],
       "data": {
         "title": { "value": "threadline GELF UDP", "type": "string" },
         "type": { "value": "org.graylog2.inputs.gelf.udp.GELFUDPInput", "type": "string" },
