@@ -33,6 +33,7 @@ generate_secrets_if_missing() {
   set_env_var GRAYLOG_ROOT_PASSWORD_SHA2 "$(sha256_of "$GRAYLOG_ROOT_PASSWORD")"
   [ -z "${GRAYLOG_PASSWORD_SECRET:-}" ] && set_env_var GRAYLOG_PASSWORD_SECRET "$(rand_str 96)"
   set_env_var GRAYLOG_HTTP_EXTERNAL_URI "http://${local_ip}:9000/"
+  [ -z "${OPENSEARCH_INITIAL_ADMIN_PASSWORD:-}" ] && set_env_var OPENSEARCH_INITIAL_ADMIN_PASSWORD "$(rand_password 20)"
 
   [ -z "${MISP_ADMIN_PASSWORD:-}" ]     && set_env_var MISP_ADMIN_PASSWORD "$(rand_str 24)"
   [ -z "${MISP_MYSQL_ROOT_PASSWORD:-}" ] && set_env_var MISP_MYSQL_ROOT_PASSWORD "$(rand_str 24)"
