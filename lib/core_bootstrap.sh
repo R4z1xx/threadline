@@ -48,9 +48,45 @@ generate_secrets_if_missing() {
   source "$ENV_FILE"
 }
 
+preflight_check_avx() {
+  # MongoDB 5.0+ (used by the Graylog stack) hard-requires AVX and will
+  # crash-loop forever without it, cascading into "Graylog can't resolve
+  # mongodb" DNS errors that look unrelated but aren't. On Proxmox VE this
+  # bites almost everyone by default: Proxmox's default CPU types (kvm64,
+  # or the newer x86-64-v2-AES baseline) deliberately exclude AVX for
+  # migration compatibility. Fail loudly here instead of letting it
+  # crash-loop silently for 20 minutes.
+  if ! grep -qm1 '\bavx\b' /proc/cpuinfo; then
+    die "$(cat <<'EOF'
+This VM's CPU doesn't expose AVX, which MongoDB 5.0+ requires -- it will
+crash-loop forever without it (you'll see "MongoDB 5.0+ requires a CPU
+with AVX support" repeating in `docker compose logs`, and Graylog will
+never come up because it can't get a stable connection to it).
+
+Fix, on the Proxmox host (not inside this VM):
+  1. Shut this VM down completely (not a guest reboot -- CPU type is a
+     QEMU launch parameter, only applied on a fresh start).
+  2. VM -> Hardware -> Processor -> Edit -> set Type to "host"
+     (or any type that includes AVX, e.g. x86-64-v3 / IvyBridge or newer,
+     if "host" isn't viable for your migration-compatibility needs).
+  3. Start the VM and re-run this installer -- it's idempotent.
+EOF
+)"
+  fi
+}
+
 start_graylog_stack() {
   local root_dir="$1"
+  preflight_check_avx
   log "Starting Graylog stack (MongoDB + OpenSearch + Graylog)..."
+
+  # Compose only auto-discovers a .env in the CURRENT directory, not the
+  # compose file's directory -- symlink it in so `docker compose` commands
+  # run manually from docker/ (e.g. `docker compose logs -f` for debugging)
+  # pick up real values instead of warning "variable not set, defaulting
+  # to blank string" and confusing whoever's debugging.
+  ln -sf "$ENV_FILE" "$root_dir/docker/.env"
+
   docker compose --env-file "$ENV_FILE" -f "$root_dir/docker/graylog-compose.yml" up -d
   wait_for_http "http://localhost:9000/api" 300
   log "Graylog is up: http://$(hostname -I | awk '{print $1}'):9000  (user: admin / password: see .env GRAYLOG_ROOT_PASSWORD)"
