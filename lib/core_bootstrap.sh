@@ -282,7 +282,7 @@ bootstrap_core() {
    point at). See docs/ai-agent-telemetry.md for the full walkthrough.
 
  Next: install agents on the VMs you want monitored:
-   curl -fsSL https://raw.githubusercontent.com/YOURORG/threadline/main/install.sh \\
+   curl -fsSL https://raw.githubusercontent.com/R4z1xx/threadline/main/install.sh \\
      | sudo bash -s -- --role=agent --graylog=$(hostname -I | awk '{print $1}')
 ======================================================================
 EOF

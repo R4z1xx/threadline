@@ -6,7 +6,7 @@
   "summary": "GELF input pre-configured for the threadline project (Vector agents ship here).",
   "description": "Sets up the GELF UDP/12201 input that every threadline agent (Vector) ships logs and EDR alerts to. Pipelines, the MISP lookup table, and dashboards are documented as a short guided setup in README.md#post-install-graylog-setup because their exact JSON schema is more version-sensitive than a plain input -- importing a stale schema silently breaks more than it helps. Re-export this pack from your own Graylog (System > Content Packs > Export) once you've built out pipelines/dashboards you like, to replace this file for future installs.",
   "vendor": "threadline",
-  "url": "https://github.com/YOURORG/threadline",
+  "url": "https://github.com/R4z1xx/threadline",
   "parameters": [],
   "entities": [
     {
