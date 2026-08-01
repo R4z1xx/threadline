@@ -70,7 +70,12 @@ sha256_of() {
 wait_for_http() {
   local url="$1" timeout="${2:-180}" waited=0
   log "Waiting for $url to respond (timeout ${timeout}s)..."
-  until curl -fsS -o /dev/null -w '%{http_code}' "$url" 2>/dev/null | grep -qE '^[0-9]+$'; do
+  # -k: MISP serves HTTPS with a self-signed cert by default (expected,
+  # documented behavior -- see README). Without this, every poll fails
+  # with curl error 60 (cert verification), which looks identical to
+  # "not up yet" and silently times out even when the service is fine.
+  # No-op for Graylog's plain-HTTP endpoint.
+  until curl -fsSk -o /dev/null -w '%{http_code}' "$url" 2>/dev/null | grep -qE '^[0-9]+$'; do
     sleep 5
     waited=$((waited + 5))
     [ "$waited" -ge "$timeout" ] && die "Timed out waiting for $url"
