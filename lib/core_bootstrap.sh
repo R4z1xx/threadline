@@ -147,24 +147,56 @@ import_graylog_content_pack() {
   log "Importing Graylog content pack (GELF input, pipelines, dashboards)..."
   local auth="admin:${GRAYLOG_ROOT_PASSWORD}"
 
-  local upload_response
-  upload_response=$(curl -fsS -u "$auth" -X POST "http://localhost:9000/api/system/content_packs" \
+  # Deliberately NOT using curl -f here: on a non-2xx response it suppresses
+  # the response body entirely, which is exactly the error detail we need
+  # to debug a schema mismatch. Capture status + body separately instead.
+  local upload_raw http_status upload_response
+  upload_raw=$(curl -sS -w '\n%{http_code}' -u "$auth" -X POST "http://localhost:9000/api/system/content_packs" \
     -H "Content-Type: application/json" -H "X-Requested-By: threadline" \
-    --data-binary "@${pack_file}") || { warn "Content pack upload failed — you can import it manually via System > Content Packs in the UI."; return; }
+    --data-binary "@${pack_file}")
+  http_status=$(echo "$upload_raw" | tail -n1)
+  upload_response=$(echo "$upload_raw" | sed '$d')
 
   local pack_id pack_rev
-  pack_id=$(echo "$upload_response"  | grep -o '"id":"[^"]*"'  | head -1 | cut -d'"' -f4)
-  pack_rev=$(echo "$upload_response" | grep -o '"rev":[0-9]*' | head -1 | cut -d':' -f2)
+
+  if [ "$http_status" -ge 200 ] && [ "$http_status" -lt 300 ]; then
+    pack_id=$(echo "$upload_response"  | grep -o '"id":"[^"]*"'  | head -1 | cut -d'"' -f4)
+    pack_rev=$(echo "$upload_response" | grep -o '"rev":[0-9]*' | head -1 | cut -d':' -f2)
+  elif echo "$upload_response" | grep -q "already found"; then
+    # Already uploaded on a prior run (idempotent re-run, or you tested the
+    # upload by hand while debugging). Not an error -- the response won't
+    # contain id/rev on this path since nothing new was created, so read
+    # them from the pack file itself instead (they're static) and proceed
+    # straight to the install step.
+    log "Content pack already uploaded from a prior run, proceeding to install..."
+    pack_id=$(grep -o '"id": *"[^"]*"' "$pack_file" | head -1 | sed 's/.*"id": *"\([^"]*\)"/\1/')
+    pack_rev=$(grep -o '"rev": *[0-9]*' "$pack_file" | head -1 | sed 's/.*"rev": *//')
+  else
+    warn "Content pack upload failed (HTTP ${http_status}): ${upload_response}"
+    warn "This is just the GELF input -- everything else (pipelines, lookup tables, dashboards) was always a manual step per docs/graylog-pipelines.md, so this doesn't block anything."
+    warn "Manual fallback: System > Inputs > select 'GELF UDP' > Launch new input, bind 0.0.0.0:12201/udp."
+    return
+  fi
 
   if [ -n "$pack_id" ] && [ -n "$pack_rev" ]; then
-    curl -fsS -u "$auth" -X POST \
+    local install_raw install_status install_body
+    install_raw=$(curl -sS -w '\n%{http_code}' -u "$auth" -X POST \
       "http://localhost:9000/api/system/content_packs/${pack_id}/${pack_rev}/installations" \
       -H "Content-Type: application/json" -H "X-Requested-By: threadline" \
-      --data '{"parameters": {}, "comment": "installed by threadline bootstrap"}' \
-      && log "Content pack installed." \
-      || warn "Content pack uploaded but install call failed — finish it from System > Content Packs in the UI."
+      --data '{"parameters": {}, "comment": "installed by threadline bootstrap"}')
+    install_status=$(echo "$install_raw" | tail -n1)
+    install_body=$(echo "$install_raw" | sed '$d')
+
+    if [ "$install_status" -ge 200 ] && [ "$install_status" -lt 300 ]; then
+      log "Content pack installed."
+    elif echo "$install_body" | grep -qi "already installed"; then
+      log "Content pack already installed -- nothing to do."
+    else
+      warn "Content pack install failed (HTTP ${install_status}): ${install_body}"
+      warn "Finish it from System > Content Packs in the Graylog UI if needed."
+    fi
   else
-    warn "Could not parse content pack ID from upload response — check http://<host>:9000/api/api-browser and finish the import manually if needed."
+    warn "Could not determine content pack ID/revision — check http://<host>:9000/api/api-browser and finish the import manually if needed."
   fi
 }
 
