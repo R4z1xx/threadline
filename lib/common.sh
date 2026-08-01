@@ -2,8 +2,8 @@
 # threadline :: lib/common.sh — sourced by run.sh and every lib/* script.
 # Not meant to be executed directly.
 
-log()  { echo -e "\033[1;34m[threadline]\033[0m $*"; }
-warn() { echo -e "\033[1;33m[threadline][WARN]\033[0m $*"; }
+log()  { echo -e "\033[1;34m[threadline]\033[0m $*" >&2; }
+warn() { echo -e "\033[1;33m[threadline][WARN]\033[0m $*" >&2; }
 die()  { echo -e "\033[1;31m[threadline][FATAL]\033[0m $*" >&2; exit 1; }
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
@@ -84,24 +84,46 @@ wait_for_http() {
 }
 
 # Interactive picker used in agent mode when --agents isn't passed.
+#
+# Reads from /dev/tty explicitly, not plain stdin. When this script runs via
+# `curl ... | sudo bash -s -- ...` (the documented install method), stdin is
+# the curl pipe itself -- by the time bash has read the whole script off it,
+# stdin is exhausted, so plain `read` gets immediate EOF and every question
+# silently defaults to "no" without ever actually prompting. /dev/tty reads
+# from the controlling terminal directly instead, bypassing that pipe.
 prompt_agent_selection() {
-  local selected=()
+  local selected=() a=""
+
+  # [ -r /dev/tty ] only checks permission bits on the device node, not
+  # whether this process actually has a controlling terminal attached --
+  # it can return true even when opening /dev/tty for real I/O would fail
+  # (e.g. no controlling tty at all). Actually attempt to open it instead.
+  if ! ( exec 3</dev/tty ) 2>/dev/null; then
+    warn "No interactive terminal available -- skipping optional-agent prompts."
+    warn "Use --agents=rustinel,falco,sysmon,atr,ollama-atr-proxy to select tools non-interactively instead."
+    echo ""
+    return
+  fi
+
   echo "Which additional tools should run on this host? (Vector is always installed.)" >&2
 
-  read -rp "Install Rustinel (EDR: Sigma+YARA+IOC on process/network events)? [y/N] " a
+  read -rp "Install Rustinel (EDR: Sigma+YARA+IOC on process/network events)? [y/N] " a < /dev/tty
   [[ "$a" =~ ^[Yy]$ ]] && selected+=("rustinel")
 
   if has_cmd docker; then
-    read -rp "Install Falco (container/syscall runtime security — Docker detected)? [y/N] " a
+    a=""
+    read -rp "Install Falco (container/syscall runtime security — Docker detected)? [y/N] " a < /dev/tty
     [[ "$a" =~ ^[Yy]$ ]] && selected+=("falco")
   else
     echo "  (Docker not detected on this host — skipping Falco prompt, it's built for container workloads.)" >&2
   fi
 
-  read -rp "Install Sysmon for Linux (Sysmon-schema process/network/file telemetry)? [y/N] " a
+  a=""
+  read -rp "Install Sysmon for Linux (Sysmon-schema process/network/file telemetry)? [y/N] " a < /dev/tty
   [[ "$a" =~ ^[Yy]$ ]] && selected+=("sysmon")
 
-  read -rp "Install ATR (AI agent threat scanning -- only useful if this host runs MCP servers, Claude Code, or similar agent tooling)? [y/N] " a
+  a=""
+  read -rp "Install ATR (AI agent threat scanning -- only useful if this host runs MCP servers, Claude Code, or similar agent tooling)? [y/N] " a < /dev/tty
   if [[ "$a" =~ ^[Yy]$ ]]; then
     if [ -z "${ATR_SCAN_PATHS:-}" ]; then
       echo "  ATR_SCAN_PATHS isn't set. Example: export ATR_SCAN_PATHS=\"/root/.claude/skills,/opt/mcp-servers\"" >&2
@@ -110,7 +132,8 @@ prompt_agent_selection() {
     selected+=("atr")
   fi
 
-  read -rp "Install the Ollama ATR proxy (only if this host runs Ollama)? [y/N] " a
+  a=""
+  read -rp "Install the Ollama ATR proxy (only if this host runs Ollama)? [y/N] " a < /dev/tty
   [[ "$a" =~ ^[Yy]$ ]] && selected+=("ollama-atr-proxy")
 
   local IFS=','
