@@ -286,8 +286,8 @@ ensure_misp_cert_has_correct_san() {
   [ -d "$ssl_dir" ] || { warn "MISP ssl/ directory not found at $ssl_dir -- skipping cert SAN check."; return; }
 
   local crt_file key_file
-  crt_file=$(find "$ssl_dir" -maxdepth 1 -iname '*.crt' | head -1) || true
-  key_file=$(find "$ssl_dir" -maxdepth 1 -iname '*.key' | head -1) || true
+  crt_file=$(find "$ssl_dir" -maxdepth 1 \( -iname 'cert.pem' -o -iname '*.crt' \) | head -1) || true
+  key_file=$(find "$ssl_dir" -maxdepth 1 \( -iname 'key.pem' -o -iname '*.key' \) | head -1) || true
 
   if [ -z "$crt_file" ] || [ -z "$key_file" ]; then
     warn "Could not find MISP's cert/key files in $ssl_dir -- skipping SAN check."
