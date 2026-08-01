@@ -160,8 +160,15 @@ import_graylog_content_pack() {
   local pack_id pack_rev
 
   if [ "$http_status" -ge 200 ] && [ "$http_status" -lt 300 ]; then
-    pack_id=$(echo "$upload_response"  | grep -o '"id":"[^"]*"'  | head -1 | cut -d'"' -f4)
-    pack_rev=$(echo "$upload_response" | grep -o '"rev":[0-9]*' | head -1 | cut -d':' -f2)
+    # `|| true` on each: if the regex doesn't match (e.g. Graylog's actual
+    # JSON formatting differs from what's expected here), grep exits
+    # non-zero even though head/cut succeed -- under pipefail that failure
+    # propagates to this bare assignment, and set -e kills the whole
+    # script silently. The downstream `[ -n "$pack_id" ]` check already
+    # handles an empty result gracefully, so just don't let a failed
+    # extraction be fatal.
+    pack_id=$(echo "$upload_response"  | grep -o '"id": *"[^"]*"'  | head -1 | sed 's/.*"id": *"\([^"]*\)"/\1/') || true
+    pack_rev=$(echo "$upload_response" | grep -o '"rev": *[0-9]*' | head -1 | sed 's/.*"rev": *//') || true
   elif echo "$upload_response" | grep -q "already found"; then
     # Already uploaded on a prior run (idempotent re-run, or you tested the
     # upload by hand while debugging). Not an error -- the response won't
@@ -169,8 +176,8 @@ import_graylog_content_pack() {
     # them from the pack file itself instead (they're static) and proceed
     # straight to the install step.
     log "Content pack already uploaded from a prior run, proceeding to install..."
-    pack_id=$(grep -o '"id": *"[^"]*"' "$pack_file" | head -1 | sed 's/.*"id": *"\([^"]*\)"/\1/')
-    pack_rev=$(grep -o '"rev": *[0-9]*' "$pack_file" | head -1 | sed 's/.*"rev": *//')
+    pack_id=$(grep -o '"id": *"[^"]*"' "$pack_file" | head -1 | sed 's/.*"id": *"\([^"]*\)"/\1/') || true
+    pack_rev=$(grep -o '"rev": *[0-9]*' "$pack_file" | head -1 | sed 's/.*"rev": *//') || true
   else
     warn "Content pack upload failed (HTTP ${http_status}): ${upload_response}"
     warn "This is just the GELF input -- everything else (pipelines, lookup tables, dashboards) was always a manual step per docs/graylog-pipelines.md, so this doesn't block anything."

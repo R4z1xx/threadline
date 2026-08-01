@@ -36,7 +36,7 @@ install_rustinel_binary() {
   mkdir -p "$RUSTINEL_DIR"
   local arch version url
   arch="$(uname -m)"
-  version="$(curl -fsSL https://api.github.com/repos/Karib0u/rustinel/releases/latest | grep '"tag_name"' | cut -d'"' -f4)"
+  version="$(curl -fsSL https://api.github.com/repos/Karib0u/rustinel/releases/latest | grep '"tag_name"' | cut -d'"' -f4)" || true
   [ -n "$version" ] || die "Could not determine latest Rustinel release version."
   url="https://github.com/Karib0u/rustinel/releases/download/${version}/rustinel-${version#v}-${arch}-unknown-linux-musl.tar.gz"
 
