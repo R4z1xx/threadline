@@ -297,14 +297,19 @@ trust_misp_cert_in_graylog() {
 
   log "Importing MISP's certificate into Graylog's trust store..."
   docker cp "$cert_file" soc-graylog:/tmp/misp-cert.pem
-  if docker exec soc-graylog keytool -importcert -noprompt -trustcacerts \
+  # -u root: the official Graylog image runs as a non-root user by default,
+  # and cacerts is typically root-owned/read-only to that user -- keytool
+  # needs write access to add an entry. Read-only checks above (-list)
+  # don't need this since cacerts is normally world-readable.
+  local import_output
+  if import_output=$(docker exec -u root soc-graylog keytool -importcert -noprompt -trustcacerts \
       -keystore "$cacerts_path" -storepass changeit \
-      -alias misp-selfsigned -file /tmp/misp-cert.pem >/dev/null 2>&1; then
+      -alias misp-selfsigned -file /tmp/misp-cert.pem 2>&1); then
     log "Certificate imported. Restarting Graylog to apply..."
     docker restart soc-graylog >/dev/null
     wait_for_http "http://localhost:9000/api" 180
   else
-    warn "Failed to import MISP's certificate into Graylog's trust store."
+    warn "Failed to import MISP's certificate into Graylog's trust store: ${import_output}"
     warn "Manual fallback: see docs/graylog-pipelines.md."
   fi
 }
