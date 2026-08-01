@@ -246,6 +246,69 @@ sync_misp_feeds() {
     || warn "Fetch trigger failed -- click 'Fetch and store all feed data' in the MISP UI instead."
 }
 
+trust_misp_cert_in_graylog() {
+  # Graylog's JVM has its own trust store, separate from curl/OpenSSL --
+  # it won't trust MISP's self-signed cert by default, which surfaces as
+  # "HTTP data adapter lookup failure ... None of the TrustManagers trust
+  # this certificate chain" once the lookup adapter starts querying MISP.
+  # This import lives in the container's writable layer, so it's wiped
+  # on any container recreate (docker compose down/up, image update) --
+  # that's exactly why this runs every time rather than once: the
+  # idempotency check below naturally re-imports after a wipe and no-ops
+  # when nothing changed.
+  local misp_host
+  misp_host=$(echo "$MISP_BASE_URL" | sed -E 's~^https?://~~; s~/.*~~; s~:.*~~')
+  [ -z "$misp_host" ] && { warn "Could not parse a hostname out of MISP_BASE_URL, skipping cert trust step."; return; }
+
+  log "Fetching MISP's TLS certificate..."
+  local cert_file="/tmp/misp-cert.pem"
+  timeout 10 bash -c "echo | openssl s_client -connect '${misp_host}:443' -servername '${misp_host}' 2>/dev/null | openssl x509" > "$cert_file" 2>/dev/null || true
+
+  if [ ! -s "$cert_file" ]; then
+    warn "Could not retrieve MISP's certificate from ${misp_host}:443 -- skipping trust store import."
+    warn "The MISP lookup adapter may fail with a TLS trust error until this is done manually (see docs/graylog-pipelines.md)."
+    return
+  fi
+
+  log "Locating Graylog's JVM trust store..."
+  local cacerts_path
+  # Prefer the trust store the running Graylog JVM actually uses (via its
+  # own JAVA_HOME) over a blind `find`, which can turn up more than one
+  # cacerts file in a JVM-based image and pick the wrong one.
+  cacerts_path=$(docker exec soc-graylog sh -c '[ -n "$JAVA_HOME" ] && [ -f "$JAVA_HOME/lib/security/cacerts" ] && echo "$JAVA_HOME/lib/security/cacerts"' 2>/dev/null) || true
+  if [ -z "$cacerts_path" ]; then
+    cacerts_path=$(docker exec soc-graylog find / -name cacerts 2>/dev/null | head -1) || true
+  fi
+
+  if [ -z "$cacerts_path" ]; then
+    warn "Could not locate cacerts inside the Graylog container -- skipping trust store import."
+    warn "The MISP lookup adapter may fail with a TLS trust error until this is done manually (see docs/graylog-pipelines.md)."
+    return
+  fi
+
+  # Idempotent: skip re-importing (and skip the restart) if this exact
+  # cert is already trusted -- keytool -list also returns non-zero if the
+  # alias exists but the underlying cert changed (e.g. MISP's cert got
+  # regenerated), so this correctly re-triggers an import in that case too.
+  if docker exec soc-graylog keytool -list -keystore "$cacerts_path" -storepass changeit -alias misp-selfsigned >/dev/null 2>&1; then
+    log "MISP certificate already trusted by Graylog."
+    return
+  fi
+
+  log "Importing MISP's certificate into Graylog's trust store..."
+  docker cp "$cert_file" soc-graylog:/tmp/misp-cert.pem
+  if docker exec soc-graylog keytool -importcert -noprompt -trustcacerts \
+      -keystore "$cacerts_path" -storepass changeit \
+      -alias misp-selfsigned -file /tmp/misp-cert.pem >/dev/null 2>&1; then
+    log "Certificate imported. Restarting Graylog to apply..."
+    docker restart soc-graylog >/dev/null
+    wait_for_http "http://localhost:9000/api" 180
+  else
+    warn "Failed to import MISP's certificate into Graylog's trust store."
+    warn "Manual fallback: see docs/graylog-pipelines.md."
+  fi
+}
+
 link_misp_to_graylog() {
   # shellcheck source=/dev/null
   source "$ENV_FILE"
@@ -259,10 +322,11 @@ link_misp_to_graylog() {
  2. Administration > List Auth Keys > Add authentication key
  3. Put the key in $ENV_FILE as MISP_API_KEY=...
  4. Re-run: sudo ./run.sh --role=core --link-misp
-    Everything else (the Graylog data adapter, cache, lookup table, and
-    enrichment pipeline) is created automatically once the key is set --
-    see docs/graylog-pipelines.md if you'd rather do it by hand instead,
-    or if any of the automated steps below warn and need a manual finish.
+    Everything else (Graylog trusting MISP's TLS cert, the data adapter,
+    cache, lookup table, and enrichment pipeline) is created automatically
+    once the key is set -- see docs/graylog-pipelines.md if you'd rather
+    do it by hand instead, or if any of the automated steps below warn
+    and need a manual finish.
 ======================================================================
 EOF
     return
@@ -274,6 +338,7 @@ EOF
   local misp_url="$MISP_BASE_URL"
   local cache_ttl="${MISP_LOOKUP_CACHE_TTL_SECONDS:-43200}"
 
+  trust_misp_cert_in_graylog
   create_misp_data_adapter "$auth" "$misp_url" "$MISP_API_KEY"
   create_misp_cache "$auth" "$cache_ttl"
   create_misp_lookup_table "$auth"
