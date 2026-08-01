@@ -447,31 +447,28 @@ print(json.dumps({
   'name': 'misp-adapter',
   'config': {
     'type': 'httpjsonpath',
-    # MISP's restSearch endpoint returned '\"Invalid output format.\"' when
-    # queried as GET .../restSearch/\${key} -- confirmed by testing against
-    # a live instance. It expects POST with the search value in the JSON
-    # body instead.
-    'url': sys.argv[1] + '/attributes/restSearch',
-    'headers': {'Authorization': sys.argv[2], 'Accept': 'application/json', 'Content-Type': 'application/json'},
+    # This Graylog version's HTTPJSONPathDataAdapter is GET-only -- POST/
+    # body_template/http_method/content_type etc. all rejected with
+    # 'Unable to map property ... Known properties include:
+    # multi_value_jsonpath, single_value_jsonpath, headers, type, url,
+    # user_agent' (confirmed via the actual 400 response, not guessed).
+    # A plain GET to .../restSearch/\${key} also fails MISP-side with
+    # 'Invalid output format.' -- but .../restSearch/value:\${key} (GET,
+    # no body needed) works, confirmed against a live instance.
+    'url': sys.argv[1] + '/attributes/restSearch/value:\${key}',
+    'headers': {'Authorization': sys.argv[2], 'Accept': 'application/json'},
     'single_value_jsonpath': '\$.response.Attribute[0].value',
     # Graylog's multi_value_jsonpath must resolve to a JSON OBJECT whose
     # top-level keys become result[\"key\"] in a pipeline rule -- NOT an
-    # array. Pointing at [*].value (an array of bare strings) can never
-    # produce result[\"event_id\"] etc.; pointing at [0] (the whole first
-    # matched attribute object) makes every one of MISP's own field names
-    # on that attribute directly available instead. Confirmed against a
-    # real MISP response: value, event_id, comment, Event.info all present
-    # at this path; there's no bare 'tags' field (tag data would live
-    # under a 'Tag' array only when tags exist, not used here).
+    # array. Pointing at [0] (the whole first matched attribute object)
+    # makes every one of MISP's own field names on that attribute
+    # directly available. Nested access (e.g. result[\"Event\"][\"info\"])
+    # is NOT supported by Graylog's rule language even so -- confirmed
+    # via a separate 'Cannot index value of type Object' error -- so the
+    # pipeline rule only reads flat top-level keys from this (value,
+    # event_id, comment). There's no bare 'tags' field either.
     'multi_value_jsonpath': '\$.response.Attribute[0]',
-    'http_method': 'POST',
-    'body_template': json.dumps({'value': '\${key}'}),
-    'content_type': 'JSON',
-    'http_error_reason_regex': '',
-    'http_timeout_ms': 5000,
-    'http_max_concurrent_requests': 2,
-    'http_user_agent': 'threadline',
-    'preferred_types': ['STRING'],
+    'user_agent': 'threadline',
   },
 }))
 " "$misp_url" "$misp_api_key"
