@@ -605,13 +605,17 @@ create_misp_lookup_table() {
 }
 
 misp_enrich_rule_source() {
-  # Generates the enrichment rule DSL for a given IP field. Confirmed
-  # against a real MISP restSearch response (see git history/PR notes):
-  # value, event_id, comment, and Event.info are all reliably present on
-  # a matched attribute. There is no bare "tags" field -- tag data only
-  # exists as a "Tag" array when tags are actually attached, so it's
-  # replaced here with Event.info (the event title) and comment (the
-  # attribute's own note), both far more useful and reliably present.
+  # Generates the enrichment rule DSL for a given IP field. value,
+  # event_id, and comment are confirmed present as flat top-level fields
+  # on a matched MISP attribute -- real-tested. Event.info (the event
+  # title) was tried too but Graylog's pipeline rule language rejects
+  # chained bracket indexing into a nested object: result["Event"]["info"]
+  # fails with "Cannot index value of type Object", even though it's
+  # syntactically what you'd expect to work. Not pursuing a workaround
+  # syntax here without being able to verify it against a live instance --
+  # sticking to fields confirmed to actually work. There is no bare
+  # "tags" field either -- tag data only exists as a "Tag" array when
+  # tags are actually attached to that specific attribute.
   local field="$1"
   cat <<RULEEOF
 rule "enrich ${field} with MISP"
@@ -621,7 +625,6 @@ then
   let result = lookup("misp_ioc_lookup", to_string(\$message.${field}));
   set_field("misp_match", result["value"]);
   set_field("misp_event_id", result["event_id"]);
-  set_field("misp_event_info", result["Event"]["info"]);
   set_field("misp_comment", result["comment"]);
 end
 RULEEOF
