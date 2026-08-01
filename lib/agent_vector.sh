@@ -33,9 +33,11 @@ install_vector() {
 type = "journald"
 
 [sinks.graylog]
-type = "gelf"
+type = "socket"
+mode = "udp"
+address = "${graylog_host}:12201"
 inputs = ["shipped_*"]
-endpoint = "udp://${graylog_host}:12201"
+encoding.codec = "gelf"
 EOF
 
   # Point the systemd unit at the whole conf.d directory instead of a single file.
