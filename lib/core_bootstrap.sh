@@ -228,6 +228,17 @@ sync_misp_feeds() {
     for entry in "${CUSTOM[@]}"; do
       [ -z "$entry" ] && continue
       IFS='|' read -r fname furl fheader <<< "$entry"
+
+      # Idempotent: skip if a feed with this exact name already exists.
+      # Without this, every re-run of --link-misp added a duplicate --
+      # reusing feeds_json (already fetched above) rather than another call.
+      local already_exists
+      already_exists=$(echo "$feeds_json" | jq -r --arg n "$fname" '.[] | .Feed | select(.name == $n) | .id' | head -1) || true
+      if [ -n "$already_exists" ]; then
+        log "  custom feed '${fname}' already exists (id ${already_exists}), skipping."
+        continue
+      fi
+
       local headers_escaped="{}"
       if [ -n "$fheader" ]; then
         local hkey="${fheader%%:*}" hval="${fheader#*:}"
