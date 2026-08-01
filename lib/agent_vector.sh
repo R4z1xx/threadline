@@ -42,6 +42,8 @@ EOF
   mkdir -p /etc/systemd/system/vector.service.d
   cat > /etc/systemd/system/vector.service.d/override.conf <<EOF
 [Service]
+ExecStartPre=
+ExecStartPre=/usr/bin/vector validate --config-dir ${VECTOR_FRAGMENTS_DIR}
 ExecStart=
 ExecStart=/usr/bin/vector --config-dir ${VECTOR_FRAGMENTS_DIR}
 EOF
