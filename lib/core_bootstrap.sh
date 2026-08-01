@@ -259,23 +259,296 @@ link_misp_to_graylog() {
  2. Administration > List Auth Keys > Add authentication key
  3. Put the key in $ENV_FILE as MISP_API_KEY=...
  4. Re-run: sudo ./run.sh --role=core --link-misp
-    (this wires the key into Graylog's MISP lookup table data adapter
-    AND enables/fetches the feeds configured via MISP_ENABLE_FEEDS /
-    MISP_CUSTOM_FEEDS in .env.example)
+    Everything else (the Graylog data adapter, cache, lookup table, and
+    enrichment pipeline) is created automatically once the key is set --
+    see docs/graylog-pipelines.md if you'd rather do it by hand instead,
+    or if any of the automated steps below warn and need a manual finish.
 ======================================================================
 EOF
     return
   fi
 
-  log "Wiring MISP API key into Graylog's lookup table data adapter..."
+  has_cmd python3 || { apt-get update -y && apt-get install -y python3; }
+
   local auth="admin:${GRAYLOG_ROOT_PASSWORD}"
-  curl -fsS -u "$auth" -X PUT "http://localhost:9000/api/system/lookup/adapters/misp-adapter" \
-    -H "Content-Type: application/json" -H "X-Requested-By: threadline" \
-    --data "{\"config\":{\"headers\":{\"Authorization\":\"${MISP_API_KEY}\"}}}" \
-    && log "MISP lookup table linked. Enrichment is now live in Graylog pipelines." \
-    || warn "No 'misp-adapter' lookup table found yet — that's expected if you haven't done the one-time pipeline/lookup-table setup in README.md#post-install-graylog-setup. Do that first (it's a 5-minute, copy-pasteable UI walkthrough), then re-run --link-misp."
+  local misp_url="$MISP_BASE_URL"
+  local cache_ttl="${MISP_LOOKUP_CACHE_TTL_SECONDS:-43200}"
+
+  create_misp_data_adapter "$auth" "$misp_url" "$MISP_API_KEY"
+  create_misp_cache "$auth" "$cache_ttl"
+  create_misp_lookup_table "$auth"
+  create_misp_pipeline "$auth"
 
   sync_misp_feeds
+}
+
+# ---- MISP lookup table + enrichment pipeline automation ----
+#
+# Each step below is idempotent (checks for an existing entity by its
+# fixed `name` before creating) and non-fatal (a failure warns with the
+# real HTTP status/body and a manual fallback, then continues to the next
+# step rather than aborting the whole chain). These schemas are Graylog's
+# plain Lookup Table / Pipeline REST API -- not content packs, which
+# proved too version-fragile earlier in this project -- but they're
+# genuinely more complex than the single flat GELF input object, so
+# treat any warning here as a real possibility, not just defensive
+# boilerplate: verify in the UI if you see one.
+
+misp_adapter_json() {
+  local misp_url="$1" misp_api_key="$2"
+  python3 -c "
+import json, sys
+print(json.dumps({
+  'title': 'threadline MISP Adapter',
+  'description': 'Auto-created by threadline',
+  'name': 'misp-adapter',
+  'config': {
+    'type': 'httpjsonpath',
+    'url': sys.argv[1] + '/attributes/restSearch/\${key}',
+    'headers': {'Authorization': sys.argv[2], 'Accept': 'application/json'},
+    'single_value_jsonpath': '\$.response.Attribute[0].value',
+    'multi_value_jsonpath': '\$.response.Attribute[*].value',
+    'http_method': 'GET',
+    'body_template': '',
+    'content_type': 'JSON',
+    'http_error_reason_regex': '',
+    'http_timeout_ms': 5000,
+    'http_max_concurrent_requests': 2,
+    'http_user_agent': 'threadline',
+    'preferred_types': ['STRING'],
+  },
+}))
+" "$misp_url" "$misp_api_key"
+}
+
+create_misp_data_adapter() {
+  local auth="$1" misp_url="$2" misp_api_key="$3"
+  local existing_status
+  existing_status=$(curl -sSk -o /dev/null -w '%{http_code}' -u "$auth" \
+    "http://localhost:9000/api/system/lookup/adapters/misp-adapter") || true
+
+  local body
+  body=$(misp_adapter_json "$misp_url" "$misp_api_key")
+
+  if [ "$existing_status" = "200" ]; then
+    log "MISP data adapter already exists, updating its API key..."
+    curl -sSk -u "$auth" -X PUT "http://localhost:9000/api/system/lookup/adapters/misp-adapter" \
+      -H "Content-Type: application/json" -H "X-Requested-By: threadline" \
+      --data "$body" >/dev/null \
+      && log "MISP data adapter updated." \
+      || warn "Failed to update MISP data adapter -- check System > Lookup Tables > Data Adapters > misp-adapter."
+    return
+  fi
+
+  log "Creating MISP data adapter..."
+  local create_raw create_status create_body
+  create_raw=$(curl -sSk -w '\n%{http_code}' -u "$auth" -X POST "http://localhost:9000/api/system/lookup/adapters" \
+    -H "Content-Type: application/json" -H "X-Requested-By: threadline" \
+    --data "$body")
+  create_status=$(echo "$create_raw" | tail -n1)
+  create_body=$(echo "$create_raw" | sed '$d')
+
+  if [ "$create_status" -ge 200 ] && [ "$create_status" -lt 300 ]; then
+    log "MISP data adapter created."
+  else
+    warn "MISP data adapter creation failed (HTTP ${create_status}): ${create_body}"
+    warn "Manual fallback: System > Lookup Tables > Data Adapters > Create data adapter -- see docs/graylog-pipelines.md."
+  fi
+}
+
+create_misp_cache() {
+  local auth="$1" ttl_seconds="$2"
+  local existing_status
+  existing_status=$(curl -sSk -o /dev/null -w '%{http_code}' -u "$auth" \
+    "http://localhost:9000/api/system/lookup/caches/misp-cache") || true
+  if [ "$existing_status" = "200" ]; then
+    log "MISP lookup cache already exists."
+    return
+  fi
+
+  log "Creating MISP lookup cache (TTL ${ttl_seconds}s)..."
+  local create_raw create_status create_body
+  create_raw=$(curl -sSk -w '\n%{http_code}' -u "$auth" -X POST "http://localhost:9000/api/system/lookup/caches" \
+    -H "Content-Type: application/json" -H "X-Requested-By: threadline" \
+    --data "{
+      \"title\": \"threadline MISP Cache\",
+      \"description\": \"Auto-created by threadline\",
+      \"name\": \"misp-cache\",
+      \"config\": {
+        \"type\": \"guava_cache\",
+        \"max_size\": 1000,
+        \"expire_after_access\": ${ttl_seconds},
+        \"expire_after_access_unit\": \"SECONDS\",
+        \"expire_after_write\": ${ttl_seconds},
+        \"expire_after_write_unit\": \"SECONDS\"
+      }
+    }")
+  create_status=$(echo "$create_raw" | tail -n1)
+  create_body=$(echo "$create_raw" | sed '$d')
+
+  if [ "$create_status" -ge 200 ] && [ "$create_status" -lt 300 ]; then
+    log "MISP lookup cache created."
+  else
+    warn "MISP lookup cache creation failed (HTTP ${create_status}): ${create_body}"
+    warn "Manual fallback: System > Lookup Tables > Caches > Create cache -- see docs/graylog-pipelines.md."
+  fi
+}
+
+get_lookup_entity_id() {
+  # $1 = auth, $2 = "adapters" or "caches", $3 = name
+  local auth="$1" endpoint="$2" name="$3"
+  local body
+  body=$(curl -sSk -u "$auth" "http://localhost:9000/api/system/lookup/${endpoint}/${name}") || true
+  echo "$body" | grep -o '"id": *"[^"]*"' | head -1 | sed 's/.*"id": *"\([^"]*\)"/\1/' || true
+}
+
+create_misp_lookup_table() {
+  local auth="$1"
+  local existing_status
+  existing_status=$(curl -sSk -o /dev/null -w '%{http_code}' -u "$auth" \
+    "http://localhost:9000/api/system/lookup/tables/misp_ioc_lookup") || true
+  if [ "$existing_status" = "200" ]; then
+    log "MISP lookup table already exists."
+    return
+  fi
+
+  local adapter_id cache_id
+  adapter_id=$(get_lookup_entity_id "$auth" "adapters" "misp-adapter")
+  cache_id=$(get_lookup_entity_id "$auth" "caches" "misp-cache")
+
+  if [ -z "$adapter_id" ] || [ -z "$cache_id" ]; then
+    warn "Could not determine adapter/cache ID -- skipping lookup table creation."
+    warn "Manual fallback: System > Lookup Tables > Create lookup table -- see docs/graylog-pipelines.md."
+    return
+  fi
+
+  log "Creating MISP lookup table..."
+  local create_raw create_status create_body
+  create_raw=$(curl -sSk -w '\n%{http_code}' -u "$auth" -X POST "http://localhost:9000/api/system/lookup/tables" \
+    -H "Content-Type: application/json" -H "X-Requested-By: threadline" \
+    --data "{
+      \"title\": \"threadline MISP IOC Lookup\",
+      \"description\": \"Auto-created by threadline\",
+      \"name\": \"misp_ioc_lookup\",
+      \"cache_id\": \"${cache_id}\",
+      \"data_adapter_id\": \"${adapter_id}\",
+      \"default_single_value\": \"\",
+      \"default_single_value_type\": \"NULL\",
+      \"default_multi_value\": \"\",
+      \"default_multi_value_type\": \"NULL\"
+    }")
+  create_status=$(echo "$create_raw" | tail -n1)
+  create_body=$(echo "$create_raw" | sed '$d')
+
+  if [ "$create_status" -ge 200 ] && [ "$create_status" -lt 300 ]; then
+    log "MISP lookup table created."
+  else
+    warn "MISP lookup table creation failed (HTTP ${create_status}): ${create_body}"
+    warn "Manual fallback: System > Lookup Tables > Create lookup table -- see docs/graylog-pipelines.md."
+  fi
+}
+
+create_misp_pipeline() {
+  local auth="$1"
+
+  local rule_exists
+  rule_exists=$(curl -sSk -u "$auth" "http://localhost:9000/api/system/pipelines/rule" 2>/dev/null \
+    | grep -o '"title": *"enrich src_ip with MISP"') || true
+
+  if [ -z "$rule_exists" ]; then
+    log "Creating MISP enrichment pipeline rule..."
+    local rule_source rule_json create_raw create_status create_body
+    rule_source=$(cat <<'RULE'
+rule "enrich src_ip with MISP"
+when
+  has_field("src_ip")
+then
+  let result = lookup("misp_ioc_lookup", to_string($message.src_ip));
+  set_field("misp_match", result["value"]);
+  set_field("misp_event_id", result["event_id"]);
+  set_field("misp_tags", result["tags"]);
+end
+RULE
+)
+    rule_json=$(python3 -c "
+import json, sys
+print(json.dumps({'title': 'enrich src_ip with MISP', 'description': 'Auto-created by threadline', 'source': sys.argv[1]}))
+" "$rule_source")
+
+    create_raw=$(curl -sSk -w '\n%{http_code}' -u "$auth" -X POST "http://localhost:9000/api/system/pipelines/rule" \
+      -H "Content-Type: application/json" -H "X-Requested-By: threadline" \
+      --data "$rule_json")
+    create_status=$(echo "$create_raw" | tail -n1)
+    create_body=$(echo "$create_raw" | sed '$d')
+
+    if [ "$create_status" -ge 200 ] && [ "$create_status" -lt 300 ]; then
+      log "Pipeline rule created."
+    else
+      warn "Pipeline rule creation failed (HTTP ${create_status}): ${create_body}"
+      warn "Manual fallback: docs/graylog-pipelines.md has the copy-paste rule DSL."
+      return
+    fi
+  else
+    log "Pipeline rule already exists."
+  fi
+
+  local pipelines_json pipeline_id
+  pipelines_json=$(curl -sSk -u "$auth" "http://localhost:9000/api/system/pipelines/pipeline") || true
+  pipeline_id=$(echo "$pipelines_json" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = []
+for p in data:
+    if p.get('title') == 'threadline MISP enrichment':
+        print(p.get('id', ''))
+        break
+" 2>/dev/null) || true
+
+  if [ -z "$pipeline_id" ]; then
+    log "Creating MISP enrichment pipeline..."
+    local pipeline_source pipeline_json create_raw create_status create_body
+    pipeline_source='pipeline "threadline MISP enrichment"
+stage 0 match either
+  rule "enrich src_ip with MISP";
+end'
+    pipeline_json=$(python3 -c "
+import json, sys
+print(json.dumps({'title': 'threadline MISP enrichment', 'description': 'Auto-created by threadline', 'source': sys.argv[1]}))
+" "$pipeline_source")
+
+    create_raw=$(curl -sSk -w '\n%{http_code}' -u "$auth" -X POST "http://localhost:9000/api/system/pipelines/pipeline" \
+      -H "Content-Type: application/json" -H "X-Requested-By: threadline" \
+      --data "$pipeline_json")
+    create_status=$(echo "$create_raw" | tail -n1)
+    create_body=$(echo "$create_raw" | sed '$d')
+
+    if [ "$create_status" -ge 200 ] && [ "$create_status" -lt 300 ]; then
+      pipeline_id=$(echo "$create_body" | grep -o '"id": *"[^"]*"' | head -1 | sed 's/.*"id": *"\([^"]*\)"/\1/') || true
+      log "Pipeline created."
+    else
+      warn "Pipeline creation failed (HTTP ${create_status}): ${create_body}"
+      warn "Manual fallback: docs/graylog-pipelines.md has the setup steps."
+      return
+    fi
+  else
+    log "Pipeline already exists."
+  fi
+
+  if [ -z "$pipeline_id" ]; then
+    warn "Could not determine pipeline ID -- skipping stream connection. Connect it manually: System > Pipelines > (find pipeline) > Edit connections."
+    return
+  fi
+
+  log "Connecting pipeline to the default stream..."
+  # "000000000000000000000001" is Graylog's fixed, well-known ID for the
+  # built-in "All messages" default stream -- stable across versions.
+  curl -sSk -u "$auth" -X POST "http://localhost:9000/api/system/pipelines/connections/to_stream" \
+    -H "Content-Type: application/json" -H "X-Requested-By: threadline" \
+    --data "{\"stream_id\": \"000000000000000000000001\", \"pipeline_ids\": [\"${pipeline_id}\"]}" >/dev/null \
+    && log "Pipeline connected to default stream." \
+    || warn "Could not connect pipeline to stream -- do it manually: System > Pipelines > (find pipeline) > Edit connections."
 }
 
 bootstrap_core() {

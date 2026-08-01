@@ -1,10 +1,15 @@
 # Graylog pipelines, Sigma alerts & MISP enrichment
 
-Copy-paste reference for the manual step in `README.md#post-install-graylog-setup`.
+The MISP enrichment section below (data adapter, cache, lookup table, pipeline rule) is created
+automatically by `sudo ./run.sh --role=core --link-misp` once `MISP_API_KEY` is set -- see
+`lib/core_bootstrap.sh` (`create_misp_data_adapter`, `create_misp_cache`, `create_misp_lookup_table`,
+`create_misp_pipeline`). What follows is the manual, click-through equivalent: useful if one of
+those automated steps warns and needs finishing by hand, or if you just want to understand what
+the automation is doing under the hood.
 
 ## MISP enrichment pipeline rule
 
-Once you've created the `misp_ioc_lookup` lookup table (README §2), add this under
+If doing this by hand: once you've created the `misp_ioc_lookup` lookup table, add this under
 **System → Pipelines → Rules → Create rule**:
 
 ```
@@ -50,9 +55,13 @@ node URL. Attach it to each Event Definition. The payload includes the full enri
 (including `misp_match`/`misp_tags` from the pipeline rule above), so n8n can branch on severity or
 CTI match without a second lookup.
 
-## Keeping this in sync with the repo
+## Backing up your pipeline/dashboard setup
 
-Once you've built pipelines/dashboards/lookup tables you're happy with, export them:
-**System → Content Packs → Export content pack**, save the JSON, and replace
-`content-packs/graylog-threadline.json` in your fork — future `--role=core` installs (yours or
-anyone else's) will then get your full setup automatically instead of just the bare GELF input.
+If you've customized pipelines/dashboards beyond what's automated here, Graylog can still export
+them as a content pack (**System → Content Packs → Export content pack**) for your own backup/
+reference purposes -- useful if you ever need to rebuild this Graylog instance from scratch. This
+repo's installer doesn't consume or auto-import that export, though: content packs turned out to
+be persistently version-fragile in practice (missing required fields, "already found" duplicate
+errors, a broken details-viewer page across different Graylog versions), so both the GELF input
+and the MISP enrichment chain are created via Graylog's plain REST API directly instead -- see the
+comment above `create_gelf_input()` in `lib/core_bootstrap.sh` for the full history.

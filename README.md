@@ -110,34 +110,35 @@ This will:
 
 Takes 5-15 minutes depending on your link speed (MISP's image pulls are the slow part).
 
-## 2. Post-install Graylog setup (one-time, ~5 minutes)
+## 2. Post-install Graylog setup (one-time, ~2 minutes)
 
-The GELF input is ready out of the box, but the MISP enrichment lookup table and Sigma-based alert
-pipeline are set up by hand once, because their exact JSON schema shifts between Graylog versions
-and a stale imported schema causes more confusion than a short guided setup. Copy-paste, no
-Graylog expertise required:
+The GELF input is created automatically during `--role=core`. The MISP enrichment lookup table
+(data adapter → cache → lookup table) and the Sigma-based alert pipeline are created automatically
+too, as soon as you provide a MISP API key -- the only genuinely manual step left:
 
 1. **Get a MISP API key**: log in to MISP (URL/creds are in `.env` on the core VM) → **Administration
    → List Auth Keys → Add authentication key**. Copy it.
-2. **Create the lookup data adapter**: Graylog UI → **System → Lookup Tables → Data Adapters →
-   Create data adapter** → type **HTTP JSON** →
-   - Name/ID: `misp-adapter`
-   - URL: `https://<misp-vm-ip>/attributes/restSearch`
-   - Header: `Authorization: <the key from step 1>`
-3. Or, skip the UI for step 2's header and just:
+2. **Provide it and re-run**:
    ```bash
    echo "MISP_API_KEY=<the key>" >> /opt/threadline/.env
    sudo /opt/threadline/run.sh --role=core --link-misp
    ```
-   (only works if you already created the `misp-adapter` data adapter once via the UI in step 2 —
-   this patches in the key automatically on every future re-run/rotation. It also **loads MISP's
-   default feed catalog, enables the feeds listed in `MISP_ENABLE_FEEDS`, adds anything in
-   `MISP_CUSTOM_FEEDS` — see the comments in `.env.example` for a Rösti example — and triggers an
-   initial fetch**, so this one command is doing double duty.)
-4. **Create a cache**: **System → Lookup Tables → Caches → Create cache**, TTL 12-24h is reasonable for a homelab.
-5. **Create the lookup table**: bind adapter + cache, name it `misp_ioc_lookup`.
-6. **Add a pipeline rule** enriching `src_ip`/`dst_ip` fields with it (Sigma alert pipelines and the
-   exact enrichment rule DSL are in [`docs/graylog-pipelines.md`](docs/graylog-pipelines.md) — copy/paste ready).
+   This one command creates the `misp-adapter` data adapter, the `misp-cache` cache (TTL from
+   `MISP_LOOKUP_CACHE_TTL_SECONDS` in `.env`, default 12h), the `misp_ioc_lookup` lookup table, the
+   `enrich src_ip with MISP` pipeline rule, the pipeline itself, and connects it to Graylog's
+   default stream. It's also safe to re-run any time -- every step checks for an existing entity by
+   name before creating a duplicate, and re-running with a rotated `MISP_API_KEY` just updates the
+   adapter's credentials in place. Same command also **loads MISP's default feed catalog, enables
+   the feeds listed in `MISP_ENABLE_FEEDS`, adds anything in `MISP_CUSTOM_FEEDS`** — see the
+   comments in `.env.example` for a Rösti example — **and triggers an initial fetch**.
+
+If any individual step warns instead of confirming success (Graylog's Lookup Table/Pipeline REST
+API schemas are more version-sensitive than the plain GELF input, so this is a real possibility,
+not just defensive boilerplate) — the warning names exactly which piece failed and includes
+Graylog's own error message plus a manual fallback for that one piece. The manual, click-through
+version of every step is documented in [`docs/graylog-pipelines.md`](docs/graylog-pipelines.md) in
+case you need to finish one of them by hand or want to understand what the automation is actually
+doing.
 
 ## 3. Install agents on every VM you want monitored
 

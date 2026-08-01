@@ -4,7 +4,7 @@
 #
 # This is the ONLY file you ever need to fetch by hand. It clones/updates
 # the full project into /opt/threadline and hands off to run.sh, which does
-# the real work with access to lib/, docker/, content-packs/ and rules/.
+# the real work with access to lib/, docker/, and rules/.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/<you>/threadline/main/install.sh | sudo bash -s -- --role=core
